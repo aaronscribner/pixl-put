@@ -208,32 +208,6 @@ public actor AXClient {
         case completed(actual: CGRectCodable?)
     }
 
-    /// Private AX symbol bridging an `AXUIElement` to its CoreGraphics window
-    /// number. This is the only reliable AX→CGWindowID mapping and is what
-    /// every macOS window manager uses; relocating a window across Spaces
-    /// (`CGSMoveWindowsToManagedSpace`) needs the CGWindowID. Resolved via
-    /// `dlsym` so the call degrades to `nil` if a future macOS removes it.
-    private static let getWindowFn: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> Int32)? = {
-        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else {
-            return nil
-        }
-        return unsafeBitCast(sym, to: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> Int32).self)
-    }()
-
-    /// The CoreGraphics window number for an AX window, or `nil` if the
-    /// private symbol is unavailable or the lookup fails. Runs on the AX
-    /// queue per constitution §VII.
-    public func windowID(of window: AXWindow) async -> CGWindowID? {
-        guard let fn = Self.getWindowFn else { return nil }
-        return await withCheckedContinuation { continuation in
-            queue.async {
-                var wid = CGWindowID(0)
-                let status = fn(window.element, &wid)
-                continuation.resume(returning: status == 0 && wid != 0 ? wid : nil)
-            }
-        }
-    }
-
     /// Set a window's fullscreen state. Returns whether the operation completed.
     public func setFullscreen(_ window: AXWindow, _ value: Bool) async throws -> Bool {
         guard hasPermission() else { throw AXError.permissionDenied }

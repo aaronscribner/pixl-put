@@ -338,22 +338,6 @@ macOS 13; and (b) the synthesized-key approach is what every other window
 manager on macOS uses, so it stays working as long as keyboard Space
 switching does.
 
-**Revision (2026-06): partially reversed for the explicit "Restore Spaces"
-command.** The switch-then-move technique above only *repositions* windows
-that are already on their correct Space (the sleep/wake case). It cannot
-*relocate* a window that ended up on the wrong Space — the common failure
-after an app restarts and macOS dumps all its windows onto the launch Space.
-Relocation genuinely requires `CGSMoveWindowsToManagedSpace` (AX and public
-CG cannot move a window across Spaces). So the user-invoked **Restore Spaces**
-command uses a hybrid: pass 1 relocates misplaced windows via
-`CGSMoveWindowsToManagedSpace` (degrading to frame-only when the symbol is
-absent — same dlsym-nil pattern as the read-side), pass 2 restores frames per
-Space via the original switch-then-move. The "removed next OS" risk is
-accepted because (a) it's gated behind an explicit user action, not the
-automatic wake/Space-switch path, and (b) it fails soft. The CGWindowID each
-relocation needs is obtained from the AX element via the private
-`_AXUIElementGetWindow` bridge.
-
 ### Alternatives considered
 
 - **Use the Mission Control hotkey + scripted clicks.** Brittle, requires

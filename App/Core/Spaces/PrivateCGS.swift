@@ -34,16 +34,6 @@ enum PrivateCGS {
         CGSConnectionID, UInt32, CFArray
     ) -> Unmanaged<CFArray>?
 
-    /// `CGSMoveWindowsToManagedSpace(connection, [CGWindowID], CGSSpaceID)`
-    /// Relocates the given CG windows onto the target Space. This is the
-    /// ONLY mechanism that moves a window between Spaces — AX and the public
-    /// CG API cannot (see research.md R-7). Write-side SLS/CGS symbols carry
-    /// a higher "removed in a future macOS" risk than the read-side ones, so
-    /// the call degrades to a no-op (returns `false`) when unavailable.
-    typealias CGSMoveWindowsToManagedSpaceFn = @convention(c) (
-        CGSConnectionID, CFArray, CGSSpaceID
-    ) -> Void
-
     // MARK: - Resolved function pointers (lazily loaded)
 
     private static let resolveLock = NSLock()
@@ -54,7 +44,6 @@ enum PrivateCGS {
         let getActiveSpace: CGSGetActiveSpaceFn?
         let copyManagedDisplaySpaces: CGSCopyManagedDisplaySpacesFn?
         let copySpacesForWindows: CGSCopySpacesForWindowsFn?
-        let moveWindowsToManagedSpace: CGSMoveWindowsToManagedSpaceFn?
     }
 
     private static func symbols() -> ResolvedSymbols {
@@ -66,8 +55,7 @@ enum PrivateCGS {
             mainConnectionID: loadSymbol("CGSMainConnectionID"),
             getActiveSpace: loadSymbol("CGSGetActiveSpace"),
             copyManagedDisplaySpaces: loadSymbol("CGSCopyManagedDisplaySpaces"),
-            copySpacesForWindows: loadSymbol("CGSCopySpacesForWindows"),
-            moveWindowsToManagedSpace: loadSymbol("CGSMoveWindowsToManagedSpace")
+            copySpacesForWindows: loadSymbol("CGSCopySpacesForWindows")
         )
         resolved = result
         return result
@@ -149,30 +137,6 @@ enum PrivateCGS {
     /// Lighter wrapper for the common "what Space is THIS window on" query.
     static func spaces(forWindow windowID: CGWindowID) -> [CGSSpaceID] {
         spacesForWindows([windowID])[windowID] ?? []
-    }
-
-    /// Relocate CG windows onto `spaceID`. Returns `false` (no-op) when the
-    /// write-side symbol is unavailable on this macOS — the caller degrades
-    /// to frame-only restoration.
-    @discardableResult
-    static func moveWindows(_ windowIDs: [CGWindowID], toSpace spaceID: CGSSpaceID) -> Bool {
-        guard !windowIDs.isEmpty else { return false }
-        let s = symbols()
-        guard let conn = s.mainConnectionID?(),
-              let moveFn = s.moveWindowsToManagedSpace else {
-            return false
-        }
-        let cfWindowIDs = windowIDs.map { NSNumber(value: $0) } as CFArray
-        moveFn(conn, cfWindowIDs, spaceID)
-        return true
-    }
-
-    /// Whether `CGSMoveWindowsToManagedSpace` resolved — required to relocate
-    /// windows across Spaces (the "Restore Spaces" command). Independent from
-    /// `isAvailable` so the caller can degrade to frame-only restoration.
-    static var canMoveWindows: Bool {
-        let s = symbols()
-        return s.mainConnectionID != nil && s.moveWindowsToManagedSpace != nil
     }
 
     /// Available iff the core private symbols resolved. Used by the

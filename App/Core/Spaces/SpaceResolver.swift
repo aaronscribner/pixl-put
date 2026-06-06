@@ -53,48 +53,6 @@ public struct SpaceResolver: Sendable {
         return mapToPerDisplayIndex(spaceID: first, displayUUID: nil) ?? 0
     }
 
-    // MARK: - Cross-Space relocation support (Restore Spaces command)
-
-    /// Raw active Space ID (not mapped to a per-display index). `nil` in
-    /// degraded mode. Used by the Space switcher to poll until a switch lands.
-    public func currentSpaceID() -> UInt64? { PrivateCGS.activeSpaceID() }
-
-    /// Ordered Space IDs (Mission Control left-to-right order) for the display
-    /// that currently holds the active Space. Empty in degraded mode. This is
-    /// the row the Ctrl+Arrow keystrokes navigate.
-    public func orderedSpaceIDsForActiveDisplay() -> [UInt64] {
-        let byDisplay = PrivateCGS.managedDisplaySpaces()
-        if let active = PrivateCGS.activeSpaceID() {
-            for (_, spaces) in byDisplay where spaces.contains(active) { return spaces }
-        }
-        return byDisplay.values.first ?? []
-    }
-
-    /// Resolve the Space ID for a per-display Space index. Prefers the named
-    /// display; falls back to the active display's ordered row. `nil` when the
-    /// index is out of range or Spaces are unavailable.
-    public func spaceID(atIndex index: Int, onDisplayUUID uuid: String?) -> UInt64? {
-        guard index >= 0 else { return nil }
-        let byDisplay = PrivateCGS.managedDisplaySpaces()
-        if let uuid, let spaces = byDisplay[uuid], index < spaces.count {
-            return spaces[index]
-        }
-        let ordered = orderedSpaceIDsForActiveDisplay()
-        return index < ordered.count ? ordered[index] : nil
-    }
-
-    /// `true` when windows can be relocated across Spaces on this macOS
-    /// (the `CGSMoveWindowsToManagedSpace` symbol resolved). When `false`,
-    /// "Restore Spaces" degrades to frame-only restoration.
-    public var canMoveWindowsAcrossSpaces: Bool { PrivateCGS.canMoveWindows }
-
-    /// Relocate a window to a target Space. Returns `false` (no-op) in
-    /// degraded mode.
-    @discardableResult
-    public func moveWindow(_ windowID: CGWindowID, toSpaceID spaceID: UInt64) -> Bool {
-        PrivateCGS.moveWindows([windowID], toSpace: spaceID)
-    }
-
     /// Map a CGS Space ID to a per-display index when we know the display.
     private func mapToPerDisplayIndex(spaceID: PrivateCGS.CGSSpaceID, displayUUID: String?) -> Int? {
         let spacesByDisplay = PrivateCGS.managedDisplaySpaces()

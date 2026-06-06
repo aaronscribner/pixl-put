@@ -31,7 +31,6 @@ public final class AppLifecycle {
     public let deepIdentityFetcher: DeepIdentityFetcher
     public let displayEnumerator: DisplayEnumerator
     public let spaceResolver: SpaceResolver
-    public let spaceSwitcher: SpaceSwitcher
     public let eventLog: EventLog
 
     public let statusModel: MenuBarStatusModel
@@ -89,7 +88,6 @@ public final class AppLifecycle {
         self.snapshotStore = SnapshotStore(directory: paths.snapshots)
         self.displayEnumerator = DisplayEnumerator()
         self.spaceResolver = SpaceResolver()
-        self.spaceSwitcher = SpaceSwitcher(resolver: SpaceResolver())
         self.deepIdentityFetcher = DeepIdentityFetcher()
         self.eventLog = EventLog()
         self.snapshotEngine = SnapshotEngine(
@@ -696,107 +694,6 @@ public final class AppLifecycle {
         }
     }
 
-    // MARK: Restore Spaces (cross-Space relocation)
-
-    /// Re-home every window to the Space it was on in the saved layout, then
-    /// restore frames per Space. Unlike `restoreNow` (which only repositions
-    /// windows on the active Space), this actually relocates windows that
-    /// ended up on the wrong Space — e.g. after an app restart dumps all its
-    /// windows onto the launch Space.
-    ///
-    /// Two passes, both driven by switching Spaces via `SpaceSwitcher`:
-    ///   1. Relocate: walk every Space; any window sitting on the wrong Space
-    ///      is moved to its target via `CGSMoveWindowsToManagedSpace`.
-    ///   2. Frames: walk each target Space and apply saved frames (reuses the
-    ///      mature `Restorer.apply(onlySpaceIndex:)` matching).
-    /// Finally returns to the originally-active Space.
-    ///
-    /// Source of truth is the master setup if one exists (an explicit, stable
-    /// layout), else the latest snapshot. Ordinal-only windows are never
-    /// relocated — matching them across an app restart is unreliable.
-    public func restoreSpaces() {
-        Task { @MainActor in
-            guard allowsManualFeatures else {
-                statusModel.lastError = "License required. Open menu bar → License…"
-                return
-            }
-            let configID = displayEnumerator.configurationID()
-            let snap: Snapshot
-            if let master = try? snapshotStore.loadMaster(forConfigurationID: configID) {
-                snap = master
-            } else if let latest = try? snapshotStore.loadLatest(forConfigurationID: configID) {
-                snap = latest
-            } else {
-                statusModel.lastError = "No saved layout for this display configuration. Capture or save a master setup first."
-                return
-            }
-
-            let ordered = spaceResolver.orderedSpaceIDsForActiveDisplay()
-            guard !ordered.isEmpty else {
-                statusModel.lastError = "Spaces aren't available on this Mac (or this macOS removed the API). Restore Spaces needs Mission Control Spaces."
-                return
-            }
-            let canRelocate = spaceResolver.canMoveWindowsAcrossSpaces
-            let originalSpaceID = spaceResolver.currentSpaceID()
-            let targets = SpaceRestorePlanner.targetSpaceByKey(snap.windows)
-
-            var relocated = 0
-            do {
-                // PASS 1 — relocate misplaced windows to their target Space.
-                if canRelocate {
-                    for spaceID in ordered {
-                        guard await spaceSwitcher.switchTo(targetSpaceID: spaceID) else { continue }
-                        let live = try await restorerBackend.resolveWindowsForRelocation()
-                        for w in live {
-                            guard let wid = w.windowID,
-                                  let target = targets[w.matchKey] else { continue }
-                            let current = spaceResolver.spaceIndex(forWindowID: wid)
-                            guard target != current,
-                                  let targetSpaceID = spaceResolver.spaceID(atIndex: target, onDisplayUUID: nil)
-                            else { continue }
-                            if spaceResolver.moveWindow(wid, toSpaceID: targetSpaceID) { relocated += 1 }
-                        }
-                    }
-                }
-
-                // PASS 2 — restore frames per target Space.
-                let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
-                var movedFrames = 0
-                for index in SpaceRestorePlanner.distinctSpaceIndices(snap.windows) {
-                    if index < ordered.count {
-                        _ = await spaceSwitcher.switchTo(targetSpaceID: ordered[index])
-                    }
-                    let report = try await restorer.apply(
-                        snap, activeDisplayFingerprintIDs: activeIDs, onlySpaceIndex: index
-                    )
-                    movedFrames += report.moved
-                }
-
-                // Return to where the user was.
-                if let original = originalSpaceID {
-                    _ = await spaceSwitcher.switchTo(targetSpaceID: original)
-                }
-
-                statusModel.lastRestore = Date()
-                statusModel.lastRestoreMoved = movedFrames
-                statusModel.lastError = canRelocate
-                    ? nil
-                    : "Restore Spaces: this macOS can't relocate windows across Spaces — restored frames only."
-                DiagnosticLog.write("restore",
-                    "Restore Spaces: relocated=\(relocated) frames=\(movedFrames) canRelocate=\(canRelocate) targets=\(targets.count)")
-                LoggerRegistry.app.log(.info,
-                    "Restore Spaces: relocated=\(relocated) frames=\(movedFrames)")
-            } catch {
-                if let original = originalSpaceID {
-                    _ = await spaceSwitcher.switchTo(targetSpaceID: original)
-                }
-                let msg = Self.describe(error: error, operation: "restoreSpaces")
-                statusModel.lastError = msg
-                LoggerRegistry.app.log(.error, "Restore Spaces failed: \(error)")
-            }
-        }
-    }
-
     /// Apply a specific historical slot (0 = current, 1..N = older).
     /// Used by the Restore Picker UI.
     public func restoreFromSlot(_ slot: Int) {
@@ -965,34 +862,6 @@ public final class AXRestorerBackend: RestorerBackend, @unchecked Sendable {
         let (_, byKey) = try await resolveLiveWindows()
         guard let axWindow = byKey[keyFor(window)] else { return false }
         return try await axClient.setFullscreen(axWindow, true)
-    }
-
-    /// A resolved window paired with its CoreGraphics window number — used by
-    /// the "Restore Spaces" relocation pass, which needs the CGWindowID to
-    /// call `CGSMoveWindowsToManagedSpace`. `windowID` is `nil` when the
-    /// private AX→CGWindowID bridge is unavailable.
-    public struct ResolvedWindow: Sendable {
-        public let matchKey: String
-        public let windowID: CGWindowID?
-    }
-
-    /// Resolve identities for every currently-enumerable window (same pipeline
-    /// as restore matching) and pair each with its CGWindowID. Used by the
-    /// relocation pass.
-    public func resolveWindowsForRelocation() async throws -> [ResolvedWindow] {
-        let (_, byKey) = try await resolveLiveWindows()
-        var out: [ResolvedWindow] = []
-        out.reserveCapacity(byKey.count)
-        for (axKey, axWindow) in byKey {
-            let key = SpaceRestorePlanner.matchKey(
-                bundleID: axKey.bundleID,
-                identity: axKey.identity,
-                ordinalInApp: axKey.ordinalInApp
-            )
-            let wid = await axClient.windowID(of: axWindow)
-            out.append(ResolvedWindow(matchKey: key, windowID: wid))
-        }
-        return out
     }
 
     private func intersectionArea(_ a: CGRectCodable, _ b: CGRectCodable) -> CGFloat {

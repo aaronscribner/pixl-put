@@ -107,12 +107,6 @@ public final class MenuBarController {
         restore.target = self
         menu.addItem(restore)
 
-        // Restore Spaces — re-home windows that ended up on the wrong Space
-        // (e.g. after an app restart), then restore frames per Space.
-        let restoreSpaces = NSMenuItem(title: "Restore Spaces", action: #selector(restoreSpacesAction), keyEquivalent: "")
-        restoreSpaces.target = self
-        menu.addItem(restoreSpaces)
-
         // Restore from history… — opens a picker so the user can choose
         // an older rotated snapshot instead of "the latest one".
         let restoreFrom = NSMenuItem(title: "Restore from history…", action: #selector(openRestorePicker), keyEquivalent: "")
@@ -220,10 +214,6 @@ public final class MenuBarController {
 
     @objc private func restoreNow() {
         lifecycle.restoreNow()
-    }
-
-    @objc private func restoreSpacesAction() {
-        lifecycle.restoreSpaces()
     }
 
     @objc private func togglePause() {

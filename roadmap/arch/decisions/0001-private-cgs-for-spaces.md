@@ -12,18 +12,15 @@ The project constitution §VI explicitly allows private CoreGraphics symbols *wh
 
 ## Decision
 
-PixPut uses these private CG symbols:
+PixPut uses three private CG symbols:
 
 | Symbol | Purpose |
 |---|---|
 | `CGSCopyManagedDisplaySpaces` | Enumerate Spaces per display (needed to record snapshot per-Space and decide restoration target) |
 | `CGSGetActiveSpace` | Identify the user's current Space at capture / restore time |
 | `CGSCopySpacesForWindows` | Resolve windows-on-Space (cross-reference with AX-only enumeration for windows hidden behind Mission Control) |
-| `CGSMoveWindowsToManagedSpace` | **(added 2026-06)** Relocate a window onto a target Space — the read-side symbols can't move windows. Used ONLY by the explicit "Restore Spaces" command, never the automatic wake/Space-switch path. |
 
-All are declared and called **only** from `Core/Spaces/PrivateCGS.swift`. The public surface of the `Core/Spaces` component is `SpaceResolver`, which does not expose the private symbols to callers.
-
-One additional private symbol, the AX bridge `_AXUIElementGetWindow` (maps an `AXUIElement` to its CGWindowID, required to feed `CGSMoveWindowsToManagedSpace`), is isolated in `Core/Accessibility/AXClient.swift` rather than `PrivateCGS.swift` because it belongs to the HIServices/AX namespace, not CGS. Same dlsym-resolve-with-nil-fallback discipline.
+All three are declared and called **only** from `Core/Spaces/PrivateCGS.swift`. The public surface of the `Core/Spaces` component is `SpaceResolver`, which does not expose the private symbols to callers.
 
 ## Fallback Path (if any symbol is removed in a future macOS)
 
@@ -32,8 +29,6 @@ One additional private symbol, the AX bridge `_AXUIElementGetWindow` (maps an `A
 | `CGSCopyManagedDisplaySpaces` | Restore without Space awareness; surface a "Spaces not preserved" badge in the menu bar |
 | `CGSGetActiveSpace` | Treat the active Space as "default Space 0" and accept degradation (windows still go to the right display + frame, just possibly the wrong Space) |
 | `CGSCopySpacesForWindows` | Use AX-only window enumeration; accept that some windows on inactive Spaces may be missed |
-| `CGSMoveWindowsToManagedSpace` | "Restore Spaces" degrades to frame-only restoration (`SpaceResolver.canMoveWindowsAcrossSpaces` is `false`); the menu surfaces "can't relocate windows on this macOS" |
-| `_AXUIElementGetWindow` (AX) | `AXClient.windowID(of:)` returns `nil`; relocation is skipped, frame restoration still runs |
 
 The fallback paths are documented in `Core/Spaces/PrivateCGS.swift` next to each symbol declaration.
 
