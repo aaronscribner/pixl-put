@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>PixlPut</string>
+    <key>CFBundleIdentifier</key>
+    <string>co.cerebraljuice.pixlput</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>PixlPut</string>
+    <key>CFBundleDisplayName</key>
+    <string>PixlPut</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>Copyright © 2026 Cerebral Juice Co. All rights reserved.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>PixlPut uses Apple Events to read the tab URLs of browsers (Brave) and workspace paths of editors (VS Code) so each individual window can be restored to its exact position. PixlPut never modifies the contents of these apps.</string>
+    <key>NSScreenCaptureDescription</key>
+    <string>PixlPut can optionally capture a thumbnail of each Space (off by default) so you can visually identify saved window layouts. Thumbnails are stored locally and never leave your Mac. You must explicitly enable this in PixlPut Settings before the permission is requested.</string>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string>https://updates.pixput.app/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>TODO_REPLACE_WITH_REAL_EDDSA_PUBLIC_KEY</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+</dict>
+</plist>

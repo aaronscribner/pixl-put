@@ -1,6 +1,6 @@
 import XCTest
 import CoreGraphics
-@testable import PixPutCore
+@testable import PixlPutCore
 
 /// Tests for the additive cross-capture merge and the stable cross-Space
 /// ordinal derivation. The bug these guard against: cross-Space CG windows

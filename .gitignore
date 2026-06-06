@@ -1,0 +1,10 @@
+
+
+# Claude Code local settings (machine-specific, do not commit)
+.claude/settings.local.json
+
+# Build artifacts & dependencies
+.build/
+build/
+node_modules/
+*.app

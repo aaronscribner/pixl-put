@@ -1,5 +1,5 @@
 import XCTest
-@testable import PixPutCore
+@testable import PixlPutCore
 
 final class SnapshotStoreTests: XCTestCase {
 

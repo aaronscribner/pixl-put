@@ -1,0 +1,12 @@
+{
+  "windowA": [
+    "https://news.ycombinator.com/news",
+    "https://github.com/anthropics/claude-code",
+    "https://developer.apple.com/documentation/appkit"
+  ],
+  "windowB": [
+    "https://www.swift.org/documentation/api-design-guidelines/",
+    "https://github.com/apple/swift-package-manager"
+  ],
+  "windowC": []
+}

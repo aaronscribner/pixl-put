@@ -53,7 +53,7 @@ public actor SnapshotEngine {
     ///   AppleScript — triggers macOS Automation permission prompts on
     ///   first use per bundle. When false, identity falls back to layer-3
     ///   (title regex) / layer-4 (ordinal) only. Default false — see
-    ///   constitution §V "graceful permission degradation": PixPut must
+    ///   constitution §V "graceful permission degradation": PixlPut must
     ///   work as-well-as-the-permissions-allow without forcing prompts.
     @discardableResult
     public func capture(trigger: CaptureTrigger, useDeepIdentity: Bool = false) async throws -> Snapshot {
@@ -358,10 +358,10 @@ public actor SnapshotEngine {
 
     /// Bundles that should never appear in a snapshot. These are system
     /// surfaces (lock screen, screensaver, fast-user-switching, TCC
-    /// permission dialogs, the System Settings window) and PixPut's own
+    /// permission dialogs, the System Settings window) and PixlPut's own
     /// process. None of them are user-positionable layout windows, and
     /// capturing them just pollutes the snapshot — observed in the wild
-    /// as dozens of stale duplicate entries for `co.cerebraljuice.pixput`
+    /// as dozens of stale duplicate entries for `co.cerebraljuice.pixlput`
     /// and `com.apple.accessibility.universalAccessAuthWarn` accumulating
     /// across captures, then surviving the merge dedupe because no later
     /// capture matched their keys.
@@ -374,7 +374,7 @@ public actor SnapshotEngine {
         "com.apple.accessibility.universalAccessAuthWarn",
         "com.apple.SecurityAgent",
         "com.apple.coreservices.uiagent",
-        "co.cerebraljuice.pixput",
+        "co.cerebraljuice.pixlput",
     ]
 
     /// Stable dedupe key for "same window appears in both AX and CG passes".
