@@ -140,9 +140,40 @@ public actor Restorer {
     public func apply(
         _ snapshot: Snapshot,
         activeDisplayFingerprintIDs: Set<String>,
+        currentDisplayBoundsByID: [String: CGRectCodable] = [:],
         onlySpaceIndex: Int? = nil
     ) async throws -> RestoreReport {
         let live = try await backend.enumerateLiveWindows()
+
+        // Re-anchoring: window frames are stored in GLOBAL desktop
+        // coordinates, which are only valid while each display sits at the
+        // same origin. When the same physical monitor is present but at a
+        // different origin (because another display was added/removed/
+        // rearranged), the raw saved frame lands in the wrong place — often
+        // off-screen (e.g. a frame at x=-3763 saved when the monitor was at
+        // x=-3840, applied now that the monitor is at x=0). Translate each
+        // frame by the delta between its display's SAVED origin and its
+        // CURRENT origin so the window lands in the same spot ON that
+        // monitor regardless of where the monitor now sits in the global
+        // layout. Falls back to the raw frame when either origin is unknown
+        // (e.g. the empty map used by unit tests) or the delta is zero.
+        let savedDisplayBoundsByID: [String: CGRectCodable] = Dictionary(
+            snapshot.displays.map { ($0.fingerprint.id, $0.bounds) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        func reanchoredFrame(for entry: WindowEntry) -> CGRectCodable {
+            guard let saved = savedDisplayBoundsByID[entry.displayFingerprintID],
+                  let current = currentDisplayBoundsByID[entry.displayFingerprintID] else {
+                return entry.frame
+            }
+            let dx = current.x - saved.x
+            let dy = current.y - saved.y
+            if dx == 0 && dy == 0 { return entry.frame }
+            return CGRectCodable(
+                x: entry.frame.x + dx, y: entry.frame.y + dy,
+                width: entry.frame.width, height: entry.frame.height
+            )
+        }
 
         // Phase C — restrict the snapshot to entries on the requested Space.
         // `nil` (default) preserves the original "restore everything" behaviour
@@ -280,20 +311,22 @@ public actor Restorer {
                 continue
             }
             let liveWindow = liveGroup[entryIndexInGroup]
+            let targetFrame = reanchoredFrame(for: entry)
 
             DiagnosticLog.write("restore", """
                 decide: PAIR bundle=\(entry.bundleID) identity=\(entry.identity) \
                 snapshotOrdinal=\(entry.ordinalInApp) liveOrdinal=\(liveWindow.ordinalInApp) \
                 liveFrame=(\(liveWindow.currentFrame.x),\(liveWindow.currentFrame.y),\
                 \(liveWindow.currentFrame.width)x\(liveWindow.currentFrame.height)) \
-                targetFrame=(\(entry.frame.x),\(entry.frame.y),\
-                \(entry.frame.width)x\(entry.frame.height)) \
+                targetFrame=(\(targetFrame.x),\(targetFrame.y),\
+                \(targetFrame.width)x\(targetFrame.height)) \
+                savedFrame=(\(entry.frame.x),\(entry.frame.y)) \
                 snapshotSpaceIndex=\(entry.spaceIndex)
                 """)
 
             // §III idempotence: don't move if already at recorded frame + state.
             if liveWindow.currentDisplayFingerprintID == entry.displayFingerprintID,
-               liveWindow.currentFrame.isApproximately(entry.frame, tolerance: tolerancePoints),
+               liveWindow.currentFrame.isApproximately(targetFrame, tolerance: tolerancePoints),
                liveWindow.isFullscreen == entry.isFullscreen {
                 skippedAlreadyAtFrame += 1
                 DiagnosticLog.write("restore", "decide: SKIP-IDEMPOTENT bundle=\(entry.bundleID)")
@@ -330,7 +363,7 @@ public actor Restorer {
                 pendingActions.append(.init(
                     bundleID: entry.bundleID,
                     window: liveWindow,
-                    kind: .move(target: entry.frame)
+                    kind: .move(target: targetFrame)
                 ))
             }
         }

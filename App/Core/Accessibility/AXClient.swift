@@ -59,6 +59,10 @@ public actor AXClient {
                     if runningApp.activationPolicy == .prohibited { continue }
                     let pid = runningApp.processIdentifier
                     let appElem = AXUIElementCreateApplication(pid)
+                    // Bound AX messaging so a single hung/busy app can't stall
+                    // the whole enumeration (all AX calls share one serial
+                    // queue). Enumeration is a read; 1s is plenty.
+                    AXUIElementSetMessagingTimeout(appElem, 1.0)
                     var windowsRef: CFTypeRef?
                     let status = AXUIElementCopyAttributeValue(
                         appElem,
@@ -147,6 +151,14 @@ public actor AXClient {
         for attempt in 0..<maxAttempts {
             let result: AttemptResult = try await withCheckedThrowingContinuation { continuation in
                 queue.async {
+                    // Bound each AX call. Without a messaging timeout, a set
+                    // to a busy/unresponsive app (VLC playing video, Outlook
+                    // syncing, etc.) blocks the SERIAL AX queue for AX's long
+                    // default (~6s+), stalling every other window's move behind
+                    // it — observed as a 13s dead gap in one restore. 1.5s is
+                    // ample for a responsive app; a set that would block longer
+                    // fails fast so the rest of the restore proceeds.
+                    AXUIElementSetMessagingTimeout(window.element, 1.5)
                     var position = CGPoint(x: frame.x, y: frame.y)
                     var size = CGSize(width: frame.width, height: frame.height)
                     guard let posValue = AXValueCreate(.cgPoint, &position),

@@ -13,7 +13,16 @@ public enum DiagnosticLog {
     private static var resolved: URL? = nil
     private static var fileHandle: FileHandle? = nil
 
+    /// True when running inside XCTest. Unit tests exercise `Restorer` /
+    /// `SnapshotEngine`, which call `write` — without this guard those writes
+    /// land in the developer's LIVE diagnostic log and clobber real run
+    /// history. No-op the file writes under test.
+    private static let isRunningTests: Bool =
+        ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+        || NSClassFromString("XCTestCase") != nil
+
     public static func write(_ category: String, _ message: String) {
+        if isRunningTests { return }
         lock.lock(); defer { lock.unlock() }
         let handle = ensureFile()
         let ts = isoFormatter.string(from: Date())

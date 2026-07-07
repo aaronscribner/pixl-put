@@ -201,6 +201,9 @@ public final class AppLifecycle {
                     let report = try await restorerLocal.apply(
                         snapshot,
                         activeDisplayFingerprintIDs: activeIDs,
+                        currentDisplayBoundsByID: Dictionary(
+                            enumerator.enumerate().map { ($0.fingerprint.id, $0.bounds) },
+                            uniquingKeysWith: { first, _ in first }),
                         onlySpaceIndex: activeSpace
                     )
                     statusModel.lastRestore = Date()
@@ -355,6 +358,9 @@ public final class AppLifecycle {
                 let report = try await restorerLocalStart.apply(
                     snapshot,
                     activeDisplayFingerprintIDs: activeIDs,
+                    currentDisplayBoundsByID: Dictionary(
+                        enumeratorStart.enumerate().map { ($0.fingerprint.id, $0.bounds) },
+                        uniquingKeysWith: { first, _ in first }),
                     onlySpaceIndex: activeSpace
                 )
                 statusModelStart.lastRestore = Date()
@@ -444,6 +450,7 @@ public final class AppLifecycle {
                     let report = try await self.restorer.apply(
                         snapshot,
                         activeDisplayFingerprintIDs: activeIDs,
+                        currentDisplayBoundsByID: self.currentDisplayBoundsByID(),
                         onlySpaceIndex: spaceIndex
                     )
                     self.statusModel.lastRestore = Date()
@@ -593,6 +600,17 @@ public final class AppLifecycle {
     }
 
     /// Manually restore the most recent snapshot for the current config.
+    /// Current display origins keyed by fingerprint id — passed to
+    /// `Restorer.apply` so saved window frames get re-anchored to where each
+    /// monitor sits now (fixes windows landing off-screen after a monitor is
+    /// added/removed/rearranged).
+    private func currentDisplayBoundsByID() -> [String: CGRectCodable] {
+        Dictionary(
+            displayEnumerator.enumerate().map { ($0.fingerprint.id, $0.bounds) },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
+
     public func restoreNow() {
         Task { @MainActor in
             guard allowsManualFeatures else {
@@ -607,8 +625,15 @@ public final class AppLifecycle {
                     LoggerRegistry.app.log(.info, "Manual restore: no snapshot for config \(configID)")
                     return
                 }
+                // Re-arm the per-Space lazy restore: a manual "Restore now"
+                // means "put my layout back", so every Space the user then
+                // switches to should restore (AX can only touch the active
+                // Space, so the others must happen on visit). Without this,
+                // `shouldRestoreOnSwitch` stays false for already-visited
+                // Spaces and only the active Space ever restores.
+                eventLog.recordWake()
                 let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
-                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs)
+                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID())
                 statusModel.lastRestore = Date()
                 statusModel.lastRestoreMoved = report.moved
                 statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
@@ -678,7 +703,7 @@ public final class AppLifecycle {
                     return
                 }
                 let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
-                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs)
+                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID())
                 statusModel.lastRestore = Date()
                 statusModel.lastRestoreMoved = report.moved
                 statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
@@ -709,7 +734,7 @@ public final class AppLifecycle {
                     return
                 }
                 let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
-                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs)
+                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID())
                 statusModel.lastRestore = Date()
                 statusModel.lastRestoreMoved = report.moved
                 statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame

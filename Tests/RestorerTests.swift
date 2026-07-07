@@ -79,6 +79,81 @@ final class RestorerTests: XCTestCase {
         XCTAssertEqual(fsCalls, 0)
     }
 
+    // REGRESSION — frames are re-anchored to a display's CURRENT origin.
+    // A window saved at x=-3763 on a monitor that was at origin x=-3840 must
+    // land at x=+77 when that same monitor now sits at origin x=0 (e.g. the
+    // second display was unplugged). Without re-anchoring it would be flung
+    // off-screen to x=-3763 — the "none of the windows go to the right place
+    // after a monitor change" bug.
+    func test_restorer_whenDisplayMovedOrigin_thenFrameIsReanchored() async throws {
+        let fp = DisplayFingerprint(vendorID: 1, productID: 2, modelNumber: 3, serialNumber: 4, displayUUID: "mon-A")
+        // Snapshot: monitor A was at origin (-3840, 0); window sits near its left edge.
+        let savedDisplay = DisplaySnapshot(
+            fingerprint: fp,
+            bounds: CGRectCodable(x: -3840, y: 0, width: 3840, height: 2160),
+            isPrimary: false, scaleFactor: 2.0
+        )
+        let entry = WindowEntry(
+            bundleID: "com.example.app",
+            identity: .ordinal(0), ordinalInApp: 0,
+            displayFingerprintID: fp.id, spaceIndex: 0,
+            frame: CGRectCodable(x: -3763, y: 49, width: 2264, height: 1555),
+            isMinimized: false, isFullscreen: false,
+            capturedAt: Date(timeIntervalSince1970: 0)
+        )
+        let snap = Snapshot(
+            displayConfigurationID: "cfg", displays: [savedDisplay],
+            capturedAt: Date(timeIntervalSince1970: 0), trigger: .manual, windows: [entry]
+        )
+        // The window currently sits somewhere else so a move is required.
+        let live = Self.liveFromEntry(entry, currentFrame: CGRectCodable(x: 100, y: 100, width: 500, height: 400))
+        let backend = FakeBackend(live: [live])
+        let restorer = Restorer(backend: backend, tolerancePoints: 1.0)
+
+        // Monitor A is now the ONLY display, at origin (0, 0).
+        let report = try await restorer.apply(
+            snap,
+            activeDisplayFingerprintIDs: [fp.id],
+            currentDisplayBoundsByID: [fp.id: CGRectCodable(x: 0, y: 0, width: 3840, height: 2160)]
+        )
+
+        XCTAssertEqual(report.moved, 1)
+        let frames = await backend.moveRequestFrames()
+        XCTAssertEqual(frames.count, 1)
+        // dx = 0 - (-3840) = +3840  ->  x: -3763 + 3840 = 77 ; y unchanged.
+        XCTAssertEqual(frames[0].x, 77, accuracy: 0.001)
+        XCTAssertEqual(frames[0].y, 49, accuracy: 0.001)
+        XCTAssertEqual(frames[0].width, 2264, accuracy: 0.001)
+    }
+
+    // Same-origin (or unknown origin) must NOT change the frame — no regression.
+    func test_restorer_whenDisplayOriginUnchanged_thenFrameIsRaw() async throws {
+        let fp = DisplayFingerprint(vendorID: 9, productID: 8, modelNumber: 7, serialNumber: 6, displayUUID: "mon-B")
+        let bounds = CGRectCodable(x: 0, y: 0, width: 3840, height: 2160)
+        let savedDisplay = DisplaySnapshot(fingerprint: fp, bounds: bounds, isPrimary: true, scaleFactor: 2.0)
+        let entry = WindowEntry(
+            bundleID: "com.example.app", identity: .ordinal(0), ordinalInApp: 0,
+            displayFingerprintID: fp.id, spaceIndex: 0,
+            frame: CGRectCodable(x: 1200, y: 300, width: 800, height: 600),
+            isMinimized: false, isFullscreen: false, capturedAt: Date(timeIntervalSince1970: 0)
+        )
+        let snap = Snapshot(
+            displayConfigurationID: "cfg", displays: [savedDisplay],
+            capturedAt: Date(timeIntervalSince1970: 0), trigger: .manual, windows: [entry]
+        )
+        let live = Self.liveFromEntry(entry, currentFrame: CGRectCodable(x: 0, y: 0, width: 500, height: 400))
+        let backend = FakeBackend(live: [live])
+        let restorer = Restorer(backend: backend, tolerancePoints: 1.0)
+        let report = try await restorer.apply(
+            snap, activeDisplayFingerprintIDs: [fp.id],
+            currentDisplayBoundsByID: [fp.id: bounds]
+        )
+        XCTAssertEqual(report.moved, 1)
+        let frames = await backend.moveRequestFrames()
+        XCTAssertEqual(frames[0].x, 1200, accuracy: 0.001)
+        XCTAssertEqual(frames[0].y, 300, accuracy: 0.001)
+    }
+
     // T013 — Skip missing window, continue with the rest (FR-011, Story-1 acceptance #3)
     func test_restorer_whenWindowMissing_thenSkipsAndContinues() async throws {
         let snap = SnapshotCodecTests.makeFixtureSnapshot()

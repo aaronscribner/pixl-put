@@ -63,6 +63,15 @@ public final class WakeTriggerWatcher: @unchecked Sendable {
 
         displayWatcher.start()
         displaySubscription = displayWatcher.subscribe { [weak self] in
+            // A display reconfiguration (monitor plugged in / arrangement
+            // changed) must re-arm the per-Space restore the same way a wake
+            // does. Without this, only the ACTIVE Space restores on a display
+            // change: `EventLog.shouldRestoreOnSwitch` gates on the last-wake
+            // timestamp, so Spaces the user already visited this session never
+            // restore when switched to. Recording a wake here resets that gate
+            // so each Space restores the first time it's visited after the
+            // display change.
+            self?.eventLog?.recordWake()
             self?.debouncer.signal()
         }
     }
