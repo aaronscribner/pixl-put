@@ -113,28 +113,10 @@ public final class MenuBarController {
         restoreFrom.target = self
         menu.addItem(restoreFrom)
 
-        // Master snapshot: save (always available) + restore (only if one
-        // exists for the current display configuration).
-        let configID = lifecycle.displayEnumerator.configurationID()
-        let hasMaster = lifecycle.snapshotStore.hasMaster(forConfigurationID: configID)
-
-        let saveMaster = NSMenuItem(
-            title: hasMaster ? "Replace master setup" : "Save as master setup",
-            action: #selector(saveMaster), keyEquivalent: ""
-        )
-        saveMaster.target = self
-        menu.addItem(saveMaster)
-
-        if hasMaster {
-            let restoreMaster = NSMenuItem(title: "Restore master setup", action: #selector(restoreMaster), keyEquivalent: "")
-            restoreMaster.target = self
-            menu.addItem(restoreMaster)
-        }
-
-        let pauseTitle = statusModel.isAutoCapturePaused ? "Resume auto-capture" : "Pause auto-capture"
-        let pause = NSMenuItem(title: pauseTitle, action: #selector(togglePause), keyEquivalent: "")
-        pause.target = self
-        menu.addItem(pause)
+        let autoRestore = NSMenuItem(title: "Auto-restore on wake", action: #selector(toggleAutoRestore), keyEquivalent: "")
+        autoRestore.target = self
+        autoRestore.state = statusModel.restoreOnSpaceSwitch ? .on : .off
+        menu.addItem(autoRestore)
 
         menu.addItem(.separator())
 
@@ -194,8 +176,8 @@ public final class MenuBarController {
         if !statusModel.hasAccessibilityPermission {
             return "⚠ Accessibility permission required"
         }
-        if statusModel.isAutoCapturePaused {
-            return "Paused"
+        if !statusModel.restoreOnSpaceSwitch {
+            return "Auto-restore off — manual only"
         }
         return statusModel.isSpaceAware ? "Active — Spaces aware" : "Active — Spaces N/A"
     }
@@ -216,17 +198,10 @@ public final class MenuBarController {
         lifecycle.restoreNow()
     }
 
-    @objc private func togglePause() {
-        lifecycle.togglePauseAutoCapture()
+    @objc private func toggleAutoRestore() {
+        lifecycle.toggleAutoRestore()
     }
 
-    @objc private func saveMaster() {
-        lifecycle.saveAsMaster()
-    }
-
-    @objc private func restoreMaster() {
-        lifecycle.restoreMaster()
-    }
 
     @objc private func openRestorePicker() {
         if restorePickerController == nil {

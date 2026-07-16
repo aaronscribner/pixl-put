@@ -12,7 +12,6 @@ public final class MenuBarStatusModel: ObservableObject {
     @Published public var lastRestoreMoved: Int = 0
     @Published public var lastRestoreSkipped: Int = 0
     @Published public var lastRestoreDisplaced: Int = 0
-    @Published public var isAutoCapturePaused: Bool = false
     @Published public var hasAccessibilityPermission: Bool = false
     @Published public var isSpaceAware: Bool = false
     /// When true, PixlPut skips per-app deep identity (no Automation
@@ -21,13 +20,18 @@ public final class MenuBarStatusModel: ObservableObject {
     /// single-window-per-app cases; multiple-window-per-app cases use
     /// the layer-3/4 fallback. Default: true (privacy-by-default).
     @Published public var deepIdentityEnabled: Bool = false
-    /// Phase D — when true, switching to a Space the user hasn't visited
-    /// since the last wake auto-restores that Space's windows. When false,
-    /// only the active-Space-at-wake gets restored automatically; other
-    /// Spaces remain at their pre-sleep arrangement (or whatever the user
-    /// has rearranged them to). Default: true — this is the documented
-    /// product behaviour the user asked for.
-    @Published public var restoreOnSpaceSwitch: Bool = true
+    /// User setting: when true, PixlPut automatically restores windows to the
+    /// captured layout after the machine wakes — the active Space immediately,
+    /// and every other Space on the first visit after wake. When false, nothing
+    /// is ever moved automatically; restore happens only when the user clicks
+    /// "Restore now". Persisted; default true. (Auto-capture was removed — the
+    /// snapshot only changes via manual "Capture now".)
+    @Published public var restoreOnSpaceSwitch: Bool {
+        didSet {
+            UserDefaults.standard.set(restoreOnSpaceSwitch, forKey: Self.autoRestoreKey)
+        }
+    }
+    private static let autoRestoreKey = "PixlPut.autoRestoreOnWake"
     /// When true, PixlPut captures a JPEG screenshot of the active display
     /// every time a Space-switch auto-capture fires. Disabled by default —
     /// requires explicit consent (the user must acknowledge that
@@ -60,6 +64,8 @@ public final class MenuBarStatusModel: ObservableObject {
     @Published public var lastError: String?
 
     public init() {
+        // Default ON when the user has never set it.
+        self.restoreOnSpaceSwitch = UserDefaults.standard.object(forKey: Self.autoRestoreKey) as? Bool ?? true
         self.enableSpaceScreenshots = UserDefaults.standard.bool(forKey: Self.enableSpaceScreenshotsKey)
         self.enableSnapshotHistoryThumbnails = UserDefaults.standard.bool(forKey: Self.enableHistoryThumbnailsKey)
     }

@@ -90,20 +90,16 @@ private struct GeneralPane: View {
             }
 
             Section("Behavior") {
-                Toggle("Pause auto-capture", isOn: Binding(
-                    get: { statusModel.isAutoCapturePaused },
-                    set: { _ in lifecycle.togglePauseAutoCapture() }
-                ))
-                Toggle("Auto-restore Spaces on first visit after wake",
+                Toggle("Auto-restore windows on wake",
                        isOn: $statusModel.restoreOnSpaceSwitch)
-                Text("When ON, switching to a Space you haven't visited since the machine woke restores that Space's windows to the captured layout. The active Space at wake is restored immediately. Other Spaces wait until you actually look at them, so PixlPut never moves windows you're not watching.")
+                Text("When ON, PixlPut restores your captured layout after the machine wakes — the active Space immediately, and every other Space the first time you switch to it. When OFF, nothing is moved automatically; restore happens only when you click Restore now. Either way, the saved layout only changes when you click Capture now.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Section("Snapshot history") {
                 HistoryLimitControl()
-                Text("Total slots to keep, including the current snapshot. Default 2 — that's the current layout plus one historical rotation. Increase if you want more time-travel history. PixlPut only creates a new historical snapshot when something actually changes (a window moved, opened, closed, or resized) — so a higher limit doesn't mean wasted history on identical states. The master snapshot is never affected.")
+                Text("Total slots to keep, including the current snapshot. Default 2 — that's the current layout plus one historical rotation. Increase if you want more time-travel history. PixlPut only creates a new historical snapshot when something actually changes (a window moved, opened, closed, or resized) — so a higher limit doesn't mean wasted history on identical states.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -14,6 +14,14 @@ public final class WakeTriggerWatcher: @unchecked Sendable {
     private var tokens: [Any] = []
     private var displaySubscription: UUID?
     private let lock = NSLock()
+    /// True from the moment the machine starts to sleep until the following
+    /// resume is consumed. This is what distinguishes a *real* wake (system
+    /// slept → apps relaunched / displays reconnected → windows displaced)
+    /// from a bare screensaver or lock/unlock cycle (nothing moved). Only a
+    /// real wake is allowed to arm the restore gate; otherwise every Space
+    /// re-restores its stale snapshot the next time it's visited — even an
+    /// hour later — clobbering whatever the user has since arranged.
+    private var pendingWake = false
 
     public init(
         debouncer: Debouncer,
@@ -34,21 +42,45 @@ public final class WakeTriggerWatcher: @unchecked Sendable {
         let nsq = NSWorkspace.shared.notificationCenter
         let dnq = DistributedNotificationCenter.default()
 
-        let wake = nsq.addObserver(
-            forName: NSWorkspace.didWakeNotification,
-            object: nil, queue: nil
-        ) { [weak self] _ in
-            self?.eventLog?.recordWake()
-            self?.debouncer.signal()
+        // "Sleep" markers. This Mac (like many desktop/clamshell setups with
+        // Electron/video wake-locks) almost never *system*-sleeps — it only
+        // sleeps its DISPLAY. macOS reports display sleep via
+        // screensDidSleep and full system sleep via willSleep. We mark a
+        // pending wake on EITHER, because either one is followed by a resume
+        // that may have reflowed windows (an external monitor powering off
+        // with the display disconnects/reconnects it). Nothing else sets
+        // this, so a bare screensaver/lock with no sleep can't look like a
+        // wake — which is what kept the gate from spuriously re-opening.
+        for sleepName in [NSWorkspace.screensDidSleepNotification, NSWorkspace.willSleepNotification] {
+            let sleep = nsq.addObserver(forName: sleepName, object: nil, queue: nil) { [weak self] _ in
+                guard let self = self else { return }
+                self.lock.lock(); self.pendingWake = true; self.lock.unlock()
+            }
+            tokens.append(sleep)
         }
-        tokens.append(wake)
 
+        // "Wake" events. Display wake (screensDidWake) is the one that actually
+        // fires on this machine; system wake (didWake) fires on the rare real
+        // sleep. Both consume the pending wake → arm the gate + trigger the
+        // active-Space restore. Consuming means a single sleep produces a
+        // single armed wake, no matter how many resume events macOS emits.
+        for wakeName in [NSWorkspace.screensDidWakeNotification, NSWorkspace.didWakeNotification] {
+            let wake = nsq.addObserver(forName: wakeName, object: nil, queue: nil) { [weak self] _ in
+                self?.consumeWakeIfPending()
+            }
+            tokens.append(wake)
+        }
+
+        // Unlock / screensaver-stop count as a wake ONLY when a real sleep
+        // preceded them. This is the fix for "Space reverts to the wrong
+        // config an hour after wake": a bare screensaver-stop used to call
+        // recordWake() unconditionally, re-opening the restore gate for every
+        // Space long after the actual wake.
         let unlocked = dnq.addObserver(
             forName: Notification.Name("com.apple.screenIsUnlocked"),
             object: nil, queue: nil
         ) { [weak self] _ in
-            self?.eventLog?.recordWake()
-            self?.debouncer.signal()
+            self?.consumeWakeIfPending()
         }
         tokens.append(unlocked)
 
@@ -56,24 +88,26 @@ public final class WakeTriggerWatcher: @unchecked Sendable {
             forName: Notification.Name("com.apple.screensaver.didstop"),
             object: nil, queue: nil
         ) { [weak self] _ in
-            self?.eventLog?.recordWake()
-            self?.debouncer.signal()
+            self?.consumeWakeIfPending()
         }
         tokens.append(saverStop)
 
-        displayWatcher.start()
-        displaySubscription = displayWatcher.subscribe { [weak self] in
-            // A display reconfiguration (monitor plugged in / arrangement
-            // changed) must re-arm the per-Space restore the same way a wake
-            // does. Without this, only the ACTIVE Space restores on a display
-            // change: `EventLog.shouldRestoreOnSwitch` gates on the last-wake
-            // timestamp, so Spaces the user already visited this session never
-            // restore when switched to. Recording a wake here resets that gate
-            // so each Space restores the first time it's visited after the
-            // display change.
-            self?.eventLog?.recordWake()
-            self?.debouncer.signal()
-        }
+        // A monitor change is NOT a wake and does NOT arm restore.
+        // (displayWatcher left unused here on purpose — kept as a field to
+        // avoid churn.)
+    }
+
+    /// Honor a resume as a wake only if the machine actually slept. Consumes
+    /// the pending-wake flag so a single sleep produces a single armed wake,
+    /// no matter how many unlock/screensaver-stop events the resume emits.
+    private func consumeWakeIfPending() {
+        lock.lock()
+        let wasPending = pendingWake
+        pendingWake = false
+        lock.unlock()
+        guard wasPending else { return }
+        eventLog?.recordWake()
+        debouncer.signal()
     }
 
     public func stop() {

@@ -166,6 +166,12 @@ public final class AppLifecycle {
 
         self.wakeDebouncer = Debouncer(window: 5.0) {
             Task { @MainActor in
+                // Respect the user's "Auto-restore on wake" setting. When off,
+                // nothing moves automatically — restore is manual-only.
+                guard statusModel.restoreOnSpaceSwitch else {
+                    DiagnosticLog.write("restore", "SKIP wake-restore: auto-restore on wake disabled by setting")
+                    return
+                }
                 // Same gate as auto-capture: if the lock screen is still
                 // up, AX is enumerating loginwindow with bogus frames and
                 // moves return AX errors. The per-entry try/catch survives
@@ -246,7 +252,10 @@ public final class AppLifecycle {
         refreshPermissionState()
         LoggerRegistry.app.log(.info,
             "AppLifecycle starting; AX permission = \(statusModel.hasAccessibilityPermission), Spaces aware = \(statusModel.isSpaceAware)")
-        idleWatcher.start()
+        // Idle auto-capture is disabled: it fired on screensaver/idle and
+        // overwrote the saved layout with whatever was on screen. Capture is
+        // manual-only now (Capture now). Watcher intentionally NOT started.
+        // idleWatcher.start()
         wakeWatcher.start()
 
         // Keep the restorer backend in sync with the deepIdentityEnabled toggle.
@@ -265,19 +274,13 @@ public final class AppLifecycle {
             .sink { [weak self] _ in self?.refreshPermissionState() }
             .store(in: &cancellables)
 
-        // Treat app launch as a synthetic wake event. Without this, the
-        // lazy Space-switch restore predicate fails (`lastWakeAt == nil`
-        // → predicate returns false → no Space-switch restores ever
-        // fire). The common scenario: user puts machine to sleep with
-        // PixlPut quit, wakes, launches PixlPut, switches to Space N — we
-        // need that Space-switch to restore the Space-N layout. Setting
-        // lastWakeAt here makes "since the last time PixlPut was alive"
-        // count as a wake for predicate purposes.
-        eventLog.recordWake(at: Date())
+        // App launch is deliberately NOT treated as a wake and does NOT
+        // arm the Space-switch restore. Launching the app must not move any
+        // windows — restore only happens on a real sleep/wake (while the app
+        // is running) or when the user explicitly clicks Restore now.
 
-        // Phase A — seed EventLog with the Space active at launch so
-        // restore-on-startup's Space handles the active one, and the
-        // lazy Space-switch restore covers the others as the user visits.
+        // Seed EventLog with the Space active at launch so it isn't later
+        // treated as "unvisited since wake".
         let initialSpace = spaceResolver.activeSpaceIndex()
         eventLog.recordSpaceVisit(spaceIndex: initialSpace)
 
@@ -329,6 +332,14 @@ public final class AppLifecycle {
         let enumeratorStart = self.displayEnumerator
         let statusModelStart = self.statusModel
         Task { @MainActor in
+            // DISABLED: launching the app must not move windows. Restore only
+            // on a real wake or explicit Restore now. (Left in place, gated
+            // off, so it's easy to re-enable behind a setting later.)
+            let restoreOnStartupEnabled = false
+            guard restoreOnStartupEnabled else {
+                DiagnosticLog.write("startup", "restore-on-startup disabled — launch does not move windows")
+                return
+            }
             // Brief delay lets AX settle and any auto-launched apps
             // (login items) finish creating their windows.
             try? await Task.sleep(nanoseconds: 1_500_000_000)
@@ -392,12 +403,15 @@ public final class AppLifecycle {
     /// re-establishing — macOS silently clamped the target frame to the
     /// main display and the window appeared not to move.
     private func handleSpaceChange(to spaceIndex: Int) {
-        let shouldRestore = statusModel.restoreOnSpaceSwitch
-            && eventLog.shouldRestoreOnSwitch(toSpaceIndex: spaceIndex)
+        // The restore gate for this Space: OPEN on the first visit since the
+        // last real wake (layout may be displaced), CLOSED on every later
+        // visit (the user owns the layout). Read it BEFORE recording the visit.
+        let gateOpen = eventLog.shouldRestoreOnSwitch(toSpaceIndex: spaceIndex)
+        let shouldRestore = statusModel.restoreOnSpaceSwitch && gateOpen
         let previouslyVisited = eventLog.lastVisited(spaceIndex: spaceIndex)
         eventLog.recordSpaceVisit(spaceIndex: spaceIndex)
         LoggerRegistry.app.log(.info,
-            "Space changed to index=\(spaceIndex); previously visited=\(previouslyVisited?.description ?? "never"); will-restore=\(shouldRestore)")
+            "Space changed to index=\(spaceIndex); previously visited=\(previouslyVisited?.description ?? "never"); gateOpen=\(gateOpen); will-restore=\(shouldRestore)")
 
         // License gate. If the state blocks auto features (expired/revoked
         // license, trial expired), skip both the Space-switch capture AND
@@ -409,15 +423,16 @@ public final class AppLifecycle {
             return
         }
 
-        // Always schedule an auto-capture for the newly-active Space.
-        // This is the workaround for "macOS AX is single-Space" — every
-        // time the user naturally visits a Space, we capture its layout,
-        // so the snapshot accumulates per-Space data without the user
-        // having to think about it. Debounced via a Task that we cancel
-        // and replace on each Space switch — rapid flip-throughs only
-        // fire one capture, for the Space the user dwells on.
-        scheduleSpaceSwitchCapture(for: spaceIndex)
+        // Capture and restore are mutually exclusive per switch, keyed on the
+        // restore gate:
+        //   gate CLOSED → the user already owns this Space's layout since the
+        //                 last wake. Do NOTHING. (Auto-capture is removed — it
+        //                 used to fire here and overwrite the saved layout with
+        //                 whatever was on screen. Capture is manual-only now.)
+        //   gate OPEN   → first visit since wake: RESTORE only.
+        guard gateOpen else { return }
 
+        // Gate open: restore only.
         guard shouldRestore else { return }
 
         let configID = displayEnumerator.configurationID()
@@ -625,15 +640,16 @@ public final class AppLifecycle {
                     LoggerRegistry.app.log(.info, "Manual restore: no snapshot for config \(configID)")
                     return
                 }
-                // Re-arm the per-Space lazy restore: a manual "Restore now"
-                // means "put my layout back", so every Space the user then
-                // switches to should restore (AX can only touch the active
-                // Space, so the others must happen on visit). Without this,
-                // `shouldRestoreOnSwitch` stays false for already-visited
-                // Spaces and only the active Space ever restores.
-                eventLog.recordWake()
+                // Manual "Restore now" restores ONLY the active Space. It
+                // deliberately does NOT recordWake()/re-arm the per-Space lazy
+                // restore. Re-arming made every *other* Space restore on its
+                // next visit — clobbering whatever layout the user had since
+                // arranged there (e.g. Space 0's windows getting yanked back
+                // to a stale snapshot the moment you switched to it). Restore
+                // now = "fix the Space I'm looking at", nothing more. Automatic
+                // multi-Space restore happens only on a real wake.
                 let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
-                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID())
+                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID(), onlySpaceIndex: spaceResolver.activeSpaceIndex())
                 statusModel.lastRestore = Date()
                 statusModel.lastRestoreMoved = report.moved
                 statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
@@ -657,67 +673,6 @@ public final class AppLifecycle {
         }
     }
 
-    // MARK: Master snapshot
-
-    /// Capture the current layout and store it as the "master" — a
-    /// separate, never-rotated snapshot the user can restore to on
-    /// demand. Replaces any existing master.
-    public func saveAsMaster() {
-        Task { @MainActor in
-            guard allowsManualFeatures else {
-                statusModel.lastError = "License required. Open menu bar → License…"
-                return
-            }
-            do {
-                // Use the normal capture path so master inherits any
-                // cross-Space data already merged into the latest snapshot.
-                let snap = try await snapshotEngine.capture(
-                    trigger: .manual,
-                    useDeepIdentity: statusModel.deepIdentityEnabled
-                )
-                try snapshotStore.saveMaster(snap)
-                statusModel.lastError = nil
-                DiagnosticLog.write("master",
-                    "saved master: configID=\(snap.displayConfigurationID) windows=\(snap.windows.count)")
-                LoggerRegistry.app.log(.info, "Master snapshot saved: \(snap.windows.count) windows")
-            } catch {
-                let msg = Self.describe(error: error, operation: "saveMaster")
-                statusModel.lastError = msg
-                LoggerRegistry.app.log(.error, "Save Master failed: \(error)")
-            }
-        }
-    }
-
-    /// Apply the master snapshot to the current OS state. Same machinery
-    /// as `restoreNow` but loads `.master.plist` instead of `.plist`.
-    public func restoreMaster() {
-        Task { @MainActor in
-            guard allowsManualFeatures else {
-                statusModel.lastError = "License required. Open menu bar → License…"
-                return
-            }
-            do {
-                let configID = displayEnumerator.configurationID()
-                guard let snap = try snapshotStore.loadMaster(forConfigurationID: configID) else {
-                    statusModel.lastError = "No master snapshot saved for this display configuration."
-                    return
-                }
-                let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
-                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID())
-                statusModel.lastRestore = Date()
-                statusModel.lastRestoreMoved = report.moved
-                statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
-                statusModel.lastRestoreDisplaced = report.displacedNoMatchingDisplay
-                statusModel.lastError = nil
-                DiagnosticLog.write("master",
-                    "restored master: moved=\(report.moved) skippedMissing=\(report.skippedMissingWindow)")
-            } catch {
-                let msg = Self.describe(error: error, operation: "restoreMaster")
-                statusModel.lastError = msg
-                LoggerRegistry.app.log(.error, "Restore Master failed: \(error)")
-            }
-        }
-    }
 
     /// Apply a specific historical slot (0 = current, 1..N = older).
     /// Used by the Restore Picker UI.
@@ -734,7 +689,7 @@ public final class AppLifecycle {
                     return
                 }
                 let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
-                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID())
+                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID(), onlySpaceIndex: spaceResolver.activeSpaceIndex())
                 statusModel.lastRestore = Date()
                 statusModel.lastRestoreMoved = report.moved
                 statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
@@ -765,9 +720,10 @@ public final class AppLifecycle {
         return "\(operation.capitalized) failed: \(error.localizedDescription)"
     }
 
-    public func togglePauseAutoCapture() {
-        statusModel.isAutoCapturePaused.toggle()
-        idleWatcher.setPaused(statusModel.isAutoCapturePaused)
+    /// Toggle the "Auto-restore on wake" user setting. When off, PixlPut never
+    /// moves windows automatically — restore is manual-only (Restore now).
+    public func toggleAutoRestore() {
+        statusModel.restoreOnSpaceSwitch.toggle()
     }
 }
 
