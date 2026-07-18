@@ -29,7 +29,6 @@ public enum RestorePickerWindow {
 private struct RestorePickerView: View {
     let lifecycle: AppLifecycle
     @State private var entries: [SnapshotStore.HistoryEntry] = []
-    @State private var hasMaster: Bool = false
     /// Per-slot thumbnails. `thumbnailsBySlot[slot][spaceIndex] = image`.
     /// Slots with no per-slot thumbnails are absent from the dict; the
     /// gallery falls back to text in that case.
@@ -42,13 +41,10 @@ private struct RestorePickerView: View {
             Divider()
             ScrollView {
                 VStack(spacing: 12) {
-                    if hasMaster {
-                        masterRow
-                    }
                     ForEach(entries) { entry in
                         historyRow(entry: entry)
                     }
-                    if entries.isEmpty && !hasMaster {
+                    if entries.isEmpty {
                         Text("No saved snapshots yet. Use **Capture now** or wait for an auto-capture to fire.")
                             .foregroundStyle(.secondary)
                             .padding(40)
@@ -80,27 +76,6 @@ private struct RestorePickerView: View {
         .padding(.top, 12)
     }
 
-    private var masterRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "star.fill").foregroundStyle(.yellow)
-                Text("Master setup").font(.headline)
-                Spacer()
-                Button("Restore master") { runMaster() }
-                    .buttonStyle(.borderedProminent)
-            }
-            // Master row reuses slot-0 thumbnails as a stand-in until
-            // we capture a dedicated set under <id>.master.space<N>.thumb.jpg.
-            if let slot0 = thumbnailsBySlot[0], !slot0.isEmpty {
-                thumbnailGallery(slot0)
-            }
-            Text("Your saved ideal layout. Survives auto-captures and rotation.")
-                .font(.caption).foregroundStyle(.secondary)
-        }
-        .padding(16)
-        .background(Color.accentColor.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
-    }
 
     private func historyRow(entry: SnapshotStore.HistoryEntry) -> some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -157,7 +132,6 @@ private struct RestorePickerView: View {
     private func refresh() {
         let configID = lifecycle.displayEnumerator.configurationID()
         entries = lifecycle.snapshotStore.listHistory(forConfigurationID: configID)
-        hasMaster = lifecycle.snapshotStore.hasMaster(forConfigurationID: configID)
         loadThumbnails()
     }
 
@@ -166,14 +140,6 @@ private struct RestorePickerView: View {
         lifecycle.restoreFromSlot(slot)
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             statusMessage = "Applied snapshot from slot \(slot)."
-        }
-    }
-
-    private func runMaster() {
-        statusMessage = "Applying master setup…"
-        lifecycle.restoreMaster()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            statusMessage = "Applied master setup."
         }
     }
 

@@ -73,10 +73,6 @@ public struct ThumbnailStore: Sendable {
         return directory.appendingPathComponent("\(configID).\(slot).space\(spaceIndex).thumb.jpg")
     }
 
-    public func masterURL(configID: String, spaceIndex: Int) -> URL {
-        directory.appendingPathComponent("\(configID).master.space\(spaceIndex).thumb.jpg")
-    }
-
     // MARK: - Rotation
 
     /// Rotate all current (slot 0) thumbnails forward to slot 1, slot 1

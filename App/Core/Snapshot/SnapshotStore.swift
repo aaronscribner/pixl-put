@@ -120,45 +120,6 @@ public struct SnapshotStore: Sendable {
         return directory.appendingPathComponent("\(configID).\(slot).plist")
     }
 
-    private func masterURL(for configID: String) -> URL {
-        directory.appendingPathComponent("\(configID).master.plist")
-    }
-
-    // MARK: - Master snapshot
-
-    /// Persist a snapshot as the "master" for this configuration. Sits
-    /// outside the rotating history — never overwritten by auto-captures.
-    /// The user explicitly saves it ("this is my ideal setup") and
-    /// restores to it on demand via the menu.
-    public func saveMaster(_ snapshot: Snapshot) throws {
-        try bootstrap()
-        let encoder = PropertyListEncoder()
-        encoder.outputFormat = .binary
-        do {
-            let data = try encoder.encode(snapshot)
-            try data.write(to: masterURL(for: snapshot.displayConfigurationID), options: .atomic)
-        } catch {
-            throw StoreError.writeFailed(error.localizedDescription)
-        }
-    }
-
-    public func loadMaster(forConfigurationID configID: String) throws -> Snapshot? {
-        let url = masterURL(for: configID)
-        guard fileManager.fileExists(atPath: url.path) else { return nil }
-        let data: Data
-        do { data = try Data(contentsOf: url) }
-        catch { throw StoreError.readFailed(error.localizedDescription) }
-        return try decode(data)
-    }
-
-    public func hasMaster(forConfigurationID configID: String) -> Bool {
-        fileManager.fileExists(atPath: masterURL(for: configID).path)
-    }
-
-    public func deleteMaster(forConfigurationID configID: String) {
-        try? fileManager.removeItem(at: masterURL(for: configID))
-    }
-
     // MARK: - Slot inspection (for the restore picker)
 
     /// Returns metadata for every present rotation slot, newest first.

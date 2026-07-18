@@ -153,99 +153,19 @@ public actor SnapshotEngine {
                 """)
         }
 
-        // Phase B — enrich with windows on OTHER Spaces via CG window list.
-        // Only runs when the CGS cross-Space symbol resolved; otherwise
-        // snapshot contains only active-Space windows (existing behaviour).
-        if spaceResolver.isCrossSpaceAware {
-            let cgWindows = CGWindowEnumerator.enumerateAllWindows()
-            // Cross-Space ordinals are derived from the CG window number
-            // (stable for a window's lifetime) rather than a running
-            // counter — see `SnapshotMerger.crossSpaceOrdinal`. A running
-            // counter seeded from the active-Space AX count made the same
-            // off-Space window draw a different ordinal each capture, which
-            // defeated the merge dedupe and grew the snapshot unbounded.
-            for w in cgWindows {
-                // FILTER 0: Bundle blocklist — same as AX path.
-                if Self.bundleBlocklist.contains(w.bundleID) { continue }
-
-                // FILTER 1: Skip windows already captured via AX.
-                let key = Self.dedupeKey(bundleID: w.bundleID, frame: w.bounds)
-                if emittedAXFingerprints.contains(key) { continue }
-
-                // FILTER 2: Require a non-empty title. CG-enumerated windows
-                // with empty titles are almost always helper popovers,
-                // tooltips, menu strips, or system overlays — never user
-                // windows. AX-discovered windows always have a title.
-                // This filter was added after diagnostic logs showed
-                // SnapshotEngine writing 100+ junk entries per bundle
-                // (menu strips at (0,0,3840×30), 64×64 status icons, etc.)
-                // during a screensaver-triggered auto-capture.
-                if w.title.isEmpty { continue }
-
-                // FILTER 3: Reject windows too small to be a user window.
-                // Real user windows are at minimum 100×100; anything smaller
-                // is a panel, tooltip, or notification toast.
-                if w.bounds.width < 100 || w.bounds.height < 100 { continue }
-
-                // FILTER 4: Require the CGS Space lookup to have actually
-                // returned a Space — `spaceIndex(forWindowID:)` falls back
-                // to 0 when the private symbol returns no spaces for a
-                // window. Without verification we'd mis-attribute helper
-                // windows to "Space 0" and surface them as off-active-Space
-                // capture targets. Only proceed if the lookup returned at
-                // least one valid Space ID.
-                let cgSpaceIDs = PrivateCGS.spaces(forWindow: w.windowID)
-                if cgSpaceIDs.isEmpty { continue }
-                let cgSpaceIndex = spaceResolver.spaceIndex(forWindowID: w.windowID)
-
-                // FILTER 5: Skip if this is somehow ALSO on the active
-                // Space — that means AX should have seen it and didn't
-                // (a stale window the AX hierarchy missed). Don't add it;
-                // we can't safely move it anyway.
-                if cgSpaceIndex == activeSpaceIndex { continue }
-
-                let displayFingerprintID = displays
-                    .max(by: { intersectionArea($0.bounds, w.bounds) < intersectionArea($1.bounds, w.bounds) })?
-                    .fingerprint.id ?? (displays.first?.fingerprint.id ?? "")
-
-                let ordinal = SnapshotMerger.crossSpaceOrdinal(forWindowID: w.windowID)
-
-                let signal = WindowSignal(
-                    bundleID: w.bundleID,
-                    title: w.title,
-                    documentURL: nil,      // CG doesn't expose document URL
-                    appProviderIdentity: nil, // deep identity is AX-bound
-                    creationOrdinal: ordinal
-                )
-                let identity = resolver.resolve(signal)
-
-                entries.append(WindowEntry(
-                    bundleID: w.bundleID,
-                    identity: identity,
-                    ordinalInApp: ordinal,
-                    displayFingerprintID: displayFingerprintID,
-                    spaceIndex: cgSpaceIndex,
-                    frame: w.bounds,
-                    isMinimized: false,    // CG doesn't expose minimized
-                    isFullscreen: false,   // CG doesn't expose fullscreen
-                    capturedAt: capturedAt
-                ))
-
-                DiagnosticLog.write("capture", """
-                    CG entry: bundle=\(w.bundleID) ordinal=\(ordinal) \
-                    title='\(w.title)' \
-                    frame=(\(w.bounds.x),\(w.bounds.y),\(w.bounds.width)x\(w.bounds.height)) \
-                    spaceIndex=\(cgSpaceIndex) activeSpaceIndex=\(activeSpaceIndex) \
-                    identity=\(identity) isOnScreen=\(w.isOnScreen)
-                    """)
-            }
-            _ = displayUUIDByFingerprintID  // (reserved — Phase C+ may map per-display)
-        }
+        // NO cross-Space (CG) capture. We only capture the ACTIVE Space, via
+        // AX, with full identity. Off-Space windows read by CG only carry a
+        // weak "Nth window of app X" identity (no URL/file) and — since AX
+        // can't move an off-Space window anyway — that data was unactionable
+        // and corrupting (merge bloat, identity mismatches, wrong-Space
+        // moves). Each Space's layout is captured when it is active and
+        // restored when it becomes active. `emittedAXFingerprints` and
+        // `displayUUIDByFingerprintID` retained for the AX path above.
+        _ = emittedAXFingerprints
+        _ = displayUUIDByFingerprintID
         DiagnosticLog.write("capture", """
-            capture done: trigger=\(trigger) total=\(entries.count) \
-            AX=\(emittedAXFingerprints.count) activeSpaceIndex=\(activeSpaceIndex) \
-            isSpaceAware=\(self.spaceResolver.isSpaceAware) \
-            isCrossSpaceAware=\(self.spaceResolver.isCrossSpaceAware)
+            capture done: trigger=\(trigger) activeSpaceIndex=\(activeSpaceIndex) \
+            activeSpaceWindows=\(entries.count) isSpaceAware=\(self.spaceResolver.isSpaceAware)
             """)
 
         // CORRUPTION GUARD: an auto-capture that fires AFTER the display
