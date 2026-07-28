@@ -54,6 +54,7 @@ public struct WindowIdentityResolver: Sendable {
     public static func defaultV1(titleRegexes: [String: TitleRegexProvider.Pattern] = [:]) -> WindowIdentityResolver {
         WindowIdentityResolver(providers: [
             DocumentPathProvider(),
+            EditorWorkspaceTitleProvider(),
             AppProviderPassthrough(),
             TitleRegexProvider(perBundle: titleRegexes),
             OrdinalProvider(),

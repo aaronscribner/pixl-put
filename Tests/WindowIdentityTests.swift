@@ -6,9 +6,11 @@ final class WindowIdentityTests: XCTestCase {
     // T030 — Resolver order: stronger layers shadow weaker ones (constitution §II)
     func test_resolver_whenDocumentPathPresent_thenReturnsLayer1IdentityNotLowerLayer() {
         let resolver = WindowIdentityResolver.defaultV1()
+        // A genuine document app (not an editor that's title-only): documentPath
+        // is the right identity here.
         let signal = WindowSignal(
-            bundleID: "com.microsoft.VSCode",
-            title: "x.swift — pixput — Visual Studio Code",
+            bundleID: "com.apple.Preview",
+            title: "report.pdf",
             documentURL: URL(fileURLWithPath: "/tmp/x.swift"),
             appProviderIdentity: nil,
             creationOrdinal: 5
@@ -19,6 +21,37 @@ final class WindowIdentityTests: XCTestCase {
             XCTAssertEqual(u.path, "/tmp/x.swift")
         } else {
             XCTFail("Expected .documentPath, got \(result)")
+        }
+    }
+
+    // VS Code is title-only: even with kAXDocumentAttribute (the open file)
+    // present, identity keys on the WORKSPACE from the title, never the file —
+    // so switching tabs doesn't change the window's identity.
+    func test_resolver_whenVSCode_thenIdentityIsWorkspaceTitleNotDocumentPath() {
+        let resolver = WindowIdentityResolver.defaultV1()
+        let openFile = WindowSignal(
+            bundleID: "com.microsoft.VSCode",
+            title: "classes.puml — Societal (Workspace)",
+            documentURL: URL(fileURLWithPath: "/tmp/classes.puml"),
+            creationOrdinal: 0
+        )
+        let otherFile = WindowSignal(
+            bundleID: "com.microsoft.VSCode",
+            title: "main.swift — Societal (Workspace)",
+            documentURL: URL(fileURLWithPath: "/tmp/main.swift"),
+            creationOrdinal: 0
+        )
+        let a = resolver.resolve(openFile)
+        let b = resolver.resolve(otherFile)
+        // Same workspace → same identity regardless of the open file.
+        XCTAssertEqual(a, b)
+        if case .documentPath = a {
+            XCTFail("VS Code must not use documentPath; got \(a)")
+        }
+        if case .titleRegex(_, let workspace) = a {
+            XCTAssertEqual(workspace, "Societal")
+        } else {
+            XCTFail("Expected workspace title identity, got \(a)")
         }
     }
 
@@ -116,8 +149,8 @@ final class WindowIdentityTests: XCTestCase {
             AppProviderPassthrough(),
         ])
         let signal = WindowSignal(
-            bundleID: "com.microsoft.VSCode",
-            title: "x.swift — pixput — Visual Studio Code",
+            bundleID: "com.apple.Preview",
+            title: "report.pdf",
             documentURL: URL(fileURLWithPath: "/tmp/x.swift"),
             creationOrdinal: 0
         )
