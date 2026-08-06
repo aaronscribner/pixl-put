@@ -14,9 +14,9 @@ actor FakeBackend: RestorerBackend {
         self.live = live
     }
 
-    func enumerateLiveWindows() async throws -> [LiveWindow] { live }
+    func enumerateLiveWindows(limitToBundleIDs: Set<String>?) async throws -> [LiveWindow] { live }
 
-    func move(window: LiveWindow, to frame: CGRectCodable) async throws -> Bool {
+    func move(window: LiveWindow, to frame: CGRectCodable, policy: MovePolicy) async throws -> Bool {
         moveRequests.append((window, frame))
         if nextMoveCancelled {
             nextMoveCancelled = false

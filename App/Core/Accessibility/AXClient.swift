@@ -44,7 +44,11 @@ public actor AXClient {
 
     /// Enumerate every visible window across every running app. Excludes
     /// hidden / closed / Dock / Window-Server-only windows.
-    public func enumerateWindows() async throws -> [AXWindow] {
+    /// - Parameter limitToBundleIDs: when non-nil, only these apps are
+    ///   walked. Enumeration is serial with a 1s messaging timeout per app,
+    ///   so on a system with dozens of running apps the full walk dominates
+    ///   restore latency; a restore only needs the apps its snapshot names.
+    public func enumerateWindows(limitToBundleIDs: Set<String>? = nil) async throws -> [AXWindow] {
         guard hasPermission() else { throw AXError.permissionDenied }
         try Task.checkCancellation()
 
@@ -57,6 +61,8 @@ public actor AXClient {
                     guard let bundleID = runningApp.bundleIdentifier else { continue }
                     // Skip system services / faceless agents.
                     if runningApp.activationPolicy == .prohibited { continue }
+                    // Restore-side narrowing — see parameter doc.
+                    if let allowed = limitToBundleIDs, !allowed.contains(bundleID) { continue }
                     let pid = runningApp.processIdentifier
                     let appElem = AXUIElementCreateApplication(pid)
                     // Bound AX messaging so a single hung/busy app can't stall
@@ -86,6 +92,14 @@ public actor AXClient {
 
                         let ordinal = (ordinalByBundle[bundleID] ?? 0)
                         ordinalByBundle[bundleID] = ordinal + 1
+                        // CGWindowID via the private AX→CG bridge. Resolved
+                        // here, on the AX queue, alongside the other
+                        // pre-fetches — it's a token decode, not app IPC.
+                        var cgWindowID: CGWindowID? = nil
+                        if let fn = AXClient.getWindowFn {
+                            var wid = CGWindowID(0)
+                            if fn(axWindow, &wid) == 0 && wid != 0 { cgWindowID = wid }
+                        }
                         windows.append(AXWindow(
                             element: axWindow,
                             bundleID: bundleID,
@@ -95,7 +109,8 @@ public actor AXClient {
                             documentURL: documentURL,
                             frame: frame,
                             isFullscreen: isFullscreen,
-                            isMinimized: isMinimized
+                            isMinimized: isMinimized,
+                            windowID: cgWindowID
                         ))
                     }
                 }
@@ -140,13 +155,13 @@ public actor AXClient {
     /// with a small delay before giving up. Without this, a snapshot
     /// restore on wake reports `moved=N` but visually leaves windows on
     /// the main screen.
-    public func move(_ window: AXWindow, to frame: CGRectCodable) async throws -> Bool {
+    public func move(_ window: AXWindow, to frame: CGRectCodable, policy: MovePolicy = .settling) async throws -> Bool {
         guard hasPermission() else { throw AXError.permissionDenied }
         try Task.checkCancellation()
 
         let tolerance: CGFloat = 2.0
-        let maxAttempts = 3
-        let interAttemptDelayNanos: UInt64 = 150_000_000  // 150 ms
+        let maxAttempts = policy.maxAttempts
+        let interAttemptDelayNanos = policy.interAttemptDelayNanos
 
         for attempt in 0..<maxAttempts {
             let result: AttemptResult = try await withCheckedThrowingContinuation { continuation in
@@ -155,10 +170,10 @@ public actor AXClient {
                     // to a busy/unresponsive app (VLC playing video, Outlook
                     // syncing, etc.) blocks the SERIAL AX queue for AX's long
                     // default (~6s+), stalling every other window's move behind
-                    // it — observed as a 13s dead gap in one restore. 1.5s is
-                    // ample for a responsive app; a set that would block longer
-                    // fails fast so the rest of the restore proceeds.
-                    AXUIElementSetMessagingTimeout(window.element, 1.5)
+                    // it — observed as a 13s dead gap in one restore. The
+                    // budget comes from the policy: 0.5s for routine restores,
+                    // 1.5s while displays settle after wake.
+                    AXUIElementSetMessagingTimeout(window.element, policy.messagingTimeout)
                     var position = CGPoint(x: frame.x, y: frame.y)
                     var size = CGSize(width: frame.width, height: frame.height)
                     guard let posValue = AXValueCreate(.cgPoint, &position),
@@ -218,6 +233,32 @@ public actor AXClient {
     private enum AttemptResult {
         case cancelledByUser
         case completed(actual: CGRectCodable?)
+    }
+
+    /// Private AX symbol bridging an `AXUIElement` to its CoreGraphics window
+    /// number. This is the only reliable AX→CGWindowID mapping and is what
+    /// every macOS window manager uses. Per-window Space relocation needs the
+    /// CGWindowID to address a window (ADR-0002). Resolved via `dlsym` so the
+    /// call degrades to `nil` if a future macOS removes it.
+    private static let getWindowFn: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> Int32)? = {
+        guard let sym = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "_AXUIElementGetWindow") else {
+            return nil
+        }
+        return unsafeBitCast(sym, to: (@convention(c) (AXUIElement, UnsafeMutablePointer<CGWindowID>) -> Int32).self)
+    }()
+
+    /// The CoreGraphics window number for an AX window, or `nil` if the
+    /// private symbol is unavailable or the lookup fails. Runs on the AX
+    /// queue per constitution §VII.
+    public func windowID(of window: AXWindow) async -> CGWindowID? {
+        guard let fn = Self.getWindowFn else { return nil }
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                var wid = CGWindowID(0)
+                let status = fn(window.element, &wid)
+                continuation.resume(returning: status == 0 && wid != 0 ? wid : nil)
+            }
+        }
     }
 
     /// Set a window's fullscreen state. Returns whether the operation completed.

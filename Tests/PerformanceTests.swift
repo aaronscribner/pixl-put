@@ -135,7 +135,7 @@ final class PerformanceTests: XCTestCase {
 actor NoOpBackend: RestorerBackend {
     private let liveWindows: [LiveWindow]
     init(live: [LiveWindow]) { self.liveWindows = live }
-    func enumerateLiveWindows() async throws -> [LiveWindow] { liveWindows }
-    func move(window: LiveWindow, to frame: CGRectCodable) async throws -> Bool { true }
+    func enumerateLiveWindows(limitToBundleIDs: Set<String>?) async throws -> [LiveWindow] { liveWindows }
+    func move(window: LiveWindow, to frame: CGRectCodable, policy: MovePolicy) async throws -> Bool { true }
     func setFullscreen(window: LiveWindow, on displayFingerprintID: String) async throws -> Bool { true }
 }

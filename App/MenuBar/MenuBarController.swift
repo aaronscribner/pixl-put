@@ -107,13 +107,31 @@ public final class MenuBarController {
         restore.target = self
         menu.addItem(restore)
 
+        // Full cross-Space restore (ADR-0002). "Restore now" fixes only the
+        // Space you're looking at; this one also puts apps back on the Space
+        // they were captured on. Disabled when the host macOS doesn't expose
+        // the relocation API, so the command never silently no-ops.
+        let restoreSpaces = NSMenuItem(title: "Restore windows to their Spaces", action: #selector(restoreSpaces), keyEquivalent: "")
+        restoreSpaces.target = self
+        let canRelocate = lifecycle.spaceResolver.canRelocateAcrossSpaces
+        let spacesSupported = lifecycle.spaceResolver.hasSupportedSpaceConfiguration
+        restoreSpaces.isEnabled = canRelocate && spacesSupported
+        if !canRelocate {
+            restoreSpaces.toolTip = "This macOS doesn't expose the Space-relocation API."
+        } else if !spacesSupported {
+            // ADR-0003 — supported only when Spaces span the displays.
+            restoreSpaces.toolTip = "Needs \"Displays have separate Spaces\" turned off "
+                + "in System Settings → Desktop & Dock."
+        }
+        menu.addItem(restoreSpaces)
+
         // Restore from history… — opens a picker so the user can choose
         // an older rotated snapshot instead of "the latest one".
         let restoreFrom = NSMenuItem(title: "Restore from history…", action: #selector(openRestorePicker), keyEquivalent: "")
         restoreFrom.target = self
         menu.addItem(restoreFrom)
 
-        let autoRestore = NSMenuItem(title: "Auto-restore on wake", action: #selector(toggleAutoRestore), keyEquivalent: "")
+        let autoRestore = NSMenuItem(title: "Auto-restore on Space switch & wake", action: #selector(toggleAutoRestore), keyEquivalent: "")
         autoRestore.target = self
         autoRestore.state = statusModel.restoreOnSpaceSwitch ? .on : .off
         menu.addItem(autoRestore)
@@ -196,6 +214,10 @@ public final class MenuBarController {
 
     @objc private func restoreNow() {
         lifecycle.restoreNow()
+    }
+
+    @objc private func restoreSpaces() {
+        lifecycle.restoreSpaces()
     }
 
     @objc private func toggleAutoRestore() {

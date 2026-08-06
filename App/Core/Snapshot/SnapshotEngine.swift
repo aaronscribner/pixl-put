@@ -138,7 +138,8 @@ public actor SnapshotEngine {
                 frame: frame,
                 isMinimized: axWindow.isMinimized,
                 isFullscreen: axWindow.isFullscreen,
-                capturedAt: capturedAt
+                capturedAt: capturedAt,
+                windowID: axWindow.windowID
             ))
             emittedAXFingerprints.insert(Self.dedupeKey(bundleID: axWindow.bundleID, frame: frame))
 
@@ -153,19 +154,67 @@ public actor SnapshotEngine {
                 """)
         }
 
-        // NO cross-Space (CG) capture. We only capture the ACTIVE Space, via
-        // AX, with full identity. Off-Space windows read by CG only carry a
-        // weak "Nth window of app X" identity (no URL/file) and — since AX
-        // can't move an off-Space window anyway — that data was unactionable
-        // and corrupting (merge bloat, identity mismatches, wrong-Space
-        // moves). Each Space's layout is captured when it is active and
-        // restored when it becomes active. `emittedAXFingerprints` and
-        // `displayUUIDByFingerprintID` retained for the AX path above.
-        _ = emittedAXFingerprints
+        // CROSS-SPACE (CG) PASS — one pass covers EVERY Space (measured:
+        // 65/65 real windows across 7 Spaces with usable frames).
+        //
+        // This pass was previously removed on the grounds that off-Space
+        // data was unactionable ("AX can't move an off-Space window") and
+        // that CG-weak identity corrupted the merge. Both grounds are gone:
+        // ADR-0002 proved off-Space windows are actionable, and matching is
+        // now windowID-first, so the weak `.ordinal` identity on CG entries
+        // is a fallback label, not the join key. Because this pass is
+        // complete, each capture REPLACES the snapshot wholesale — the
+        // additive cross-capture merge (and its bloat pathology) is gone;
+        // `SnapshotMerger.enrich` only carries identity forward by windowID.
+        var crossSpaceCount = 0
+        let axWindowIDs = Set(entries.compactMap(\.windowID))
+        for cgWindow in CGWindowEnumerator.enumerateAllWindows() {
+            // Same exclusions as the AX pass, same reasons.
+            if Self.bundleBlocklist.contains(cgWindow.bundleID) { continue }
+            let frame = cgWindow.bounds
+            if frame.width < 100 || frame.height < 100 { continue }
+
+            // Skip windows the AX pass already captured with full identity —
+            // windowID join first, frame key as fallback for a nil bridge.
+            if axWindowIDs.contains(cgWindow.windowID) { continue }
+            if emittedAXFingerprints.contains(Self.dedupeKey(bundleID: cgWindow.bundleID, frame: frame)) { continue }
+
+            // A window with no queryable Space (sticky all-Spaces surfaces,
+            // windows mid-teardown, CGS degraded) is skipped outright:
+            // recording it as "Space 0" would pile unqueryables onto the
+            // first Space, which is exactly the corruption the old CG pass
+            // was removed for.
+            guard let spaceIndex = spaceResolver.spaceIndexIfKnown(forWindowID: cgWindow.windowID) else { continue }
+
+            let displayFingerprintID = displays
+                .max(by: { intersectionArea($0.bounds, frame) < intersectionArea($1.bounds, frame) })?
+                .fingerprint.id ?? (displays.first?.fingerprint.id ?? "")
+
+            entries.append(WindowEntry(
+                bundleID: cgWindow.bundleID,
+                // Weak identity by construction — CG exposes no document URL
+                // or tab set, and titles need Screen Recording permission.
+                // The windowID-derived ordinal is stable across captures
+                // (SnapshotMerger.crossSpaceOrdinal rationale); real identity
+                // is enriched from the previous snapshot by windowID, or
+                // captured fresh next time this window's Space is active.
+                identity: .ordinal(SnapshotMerger.crossSpaceOrdinal(forWindowID: cgWindow.windowID)),
+                ordinalInApp: SnapshotMerger.crossSpaceOrdinal(forWindowID: cgWindow.windowID),
+                displayFingerprintID: displayFingerprintID,
+                spaceIndex: spaceIndex,
+                frame: frame,
+                isMinimized: false,
+                isFullscreen: false,
+                capturedAt: capturedAt,
+                windowID: cgWindow.windowID
+            ))
+            crossSpaceCount += 1
+        }
         _ = displayUUIDByFingerprintID
         DiagnosticLog.write("capture", """
             capture done: trigger=\(trigger) activeSpaceIndex=\(activeSpaceIndex) \
-            activeSpaceWindows=\(entries.count) isSpaceAware=\(self.spaceResolver.isSpaceAware)
+            activeSpaceWindows=\(entries.count - crossSpaceCount) \
+            crossSpaceWindows=\(crossSpaceCount) isSpaceAware=\(self.spaceResolver.isSpaceAware)
             """)
 
         // CORRUPTION GUARD: an auto-capture that fires AFTER the display
@@ -219,33 +268,21 @@ public actor SnapshotEngine {
             }
         }
 
-        // ADDITIVE MERGE with dedupe: each capture replaces ONLY entries
-        // for the currently-active Space. Entries the previous snapshot
-        // held for OTHER Spaces are retained — so capturing on Space 1
-        // doesn't wipe the Space-0 layout that was captured earlier.
-        //
-        // BUT the cross-Space CG pass above also produces entries for
-        // other Spaces. Without dedupe, every capture re-adds prev's
-        // other-Space entries on top of the current CG ones, producing
-        // O(N) growth per save — observed 33+ duplicate entries appended
-        // per Space-switch capture, growing the snapshot to 1000+
-        // entries within an hour of normal use.
-        //
-        // Fix: build a key set from the current entries (AX + CG) and
-        // skip any prev entry whose key is already present. Fresh data
-        // always wins; missed coverage in current's CG pass falls back
-        // to retained prev data.
-        let (mergedEntries, mergeStats) = SnapshotMerger.merge(
+        // WHOLESALE REPLACE + identity enrichment. The CG pass above covers
+        // every Space, so each capture is complete and the previous
+        // snapshot's entries are never retained — the additive merge (and
+        // its unbounded-growth pathology) is gone. The only thing carried
+        // forward is IDENTITY: an off-Space window captured weakly by CG
+        // inherits the full identity (document URL, tab set, workspace) it
+        // was given the last time its Space was active, joined by windowID.
+        let (mergedEntries, enrichStats) = SnapshotMerger.enrich(
             current: entries,
-            previous: previousSnapshot?.windows,
-            activeSpaceIndex: activeSpaceIndex
+            previous: previousSnapshot?.windows
         )
         if previousSnapshot != nil {
             DiagnosticLog.write("capture", """
-                MERGE: kept \(mergeStats.keptFromOtherSpaces) entries from other Spaces; \
-                dropped \(mergeStats.droppedToCurrent) duplicates already present in current capture; \
-                dropped \(mergeStats.droppedAsLegacyDuplicate) legacy duplicates from previous snapshot; \
-                replaced \(mergeStats.replacedActiveSpace) entries for activeSpaceIndex=\(activeSpaceIndex)
+                ENRICH: upgraded \(enrichStats.identityUpgraded) weak entries with previous identity; \
+                \(enrichStats.leftWeak) remain weak (windowID unseen before or app restarted)
                 """)
         }
 
@@ -295,6 +332,15 @@ public actor SnapshotEngine {
         "com.apple.SecurityAgent",
         "com.apple.coreservices.uiagent",
         "co.cerebraljuice.pixlput",
+        // System UI surfaces, not user windows. Notification Center in
+        // particular puts 2 full-size windows on EVERY Space; captured, they
+        // outvote real windows in Space planning (measured: 12 of the 38
+        // displaced windows in the 2026-08-04 dry run) and pad every restore.
+        "com.apple.notificationcenterui",
+        "com.apple.dock",
+        "com.apple.controlcenter",
+        "com.apple.PasswordManagerAutoFillAgent",
+        "com.apple.WindowServer",
     ]
 
     /// Stable dedupe key for "same window appears in both AX and CG passes".
@@ -309,8 +355,18 @@ public actor SnapshotEngine {
     /// a real change.
     private static let equivalenceFrameTolerance: CGFloat = 1.0
 
+    /// Equivalence key for the change guard. windowID-first: identity
+    /// enrichment can upgrade an entry's identity between two captures of
+    /// the SAME physical window, and that must not read as a layout change.
+    /// Space stays in the key — the same window on a different Space IS a
+    /// change. Composite fallback for entries without a windowID.
+    private static func equivalenceKey(_ entry: WindowEntry) -> String {
+        if let wid = entry.windowID { return "w\(wid)|\(entry.spaceIndex)" }
+        return "\(entry.spaceIndex)|\(entry.bundleID)|\(entry.identity)|\(entry.ordinalInApp)"
+    }
+
     /// True when two window sets describe the same logical layout:
-    ///  - Same set of `(bundleID, identity, ordinalInApp, spaceIndex)` keys.
+    ///  - Same set of `equivalenceKey`s (windowID+Space, or composite).
     ///  - Each matched pair has frames within `equivalenceFrameTolerance`.
     ///  - `isFullscreen` and `isMinimized` match.
     ///
@@ -324,11 +380,11 @@ public actor SnapshotEngine {
         guard a.count == b.count else { return false }
         // Build keyed lookup of b. Use last-write-wins on collision —
         // safer than trapping when an older corrupted snapshot has
-        // duplicates the merge dedupe didn't catch.
+        // duplicates dedupe didn't catch.
         var bByKey: [String: WindowEntry] = [:]
-        for entry in b { bByKey[SnapshotMerger.mergeDedupeKey(entry)] = entry }
+        for entry in b { bByKey[Self.equivalenceKey(entry)] = entry }
         for entry in a {
-            let key = SnapshotMerger.mergeDedupeKey(entry)
+            let key = Self.equivalenceKey(entry)
             guard let bMatch = bByKey.removeValue(forKey: key) else { return false }
             if entry.isFullscreen != bMatch.isFullscreen { return false }
             if entry.isMinimized != bMatch.isMinimized { return false }

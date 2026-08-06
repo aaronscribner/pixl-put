@@ -1,18 +1,72 @@
 import Foundation
 import CoreGraphics
 
+/// How aggressively a move verifies and retries. The right policy depends on
+/// WHY the restore is running, and only the caller knows that.
+///
+/// The measured cost of getting this wrong (diagnostic log, 2026-08-02): a
+/// single moved window took 6.7–12s because the settling-grade policy —
+/// 3 attempts × (set + set + re-read), each call under a 1.5s messaging
+/// timeout against a busy app — was applied to a routine Space switch. The
+/// clamp pathology it defends against (AX reporting `.success` while
+/// silently leaving the window in place) only occurs while displays are
+/// re-attaching after wake or reconfiguration.
+public enum MovePolicy: Sendable {
+    /// Routine conditions — Space switch, manual restore. The window server
+    /// is settled: a set either lands immediately or the app is busy, and
+    /// waiting on a busy app blocks every other window behind it. One
+    /// attempt, 0.5s messaging timeout.
+    case fast
+    /// Displays are settling — wake, monitor reconfiguration. AX silently
+    /// clamps positions until the virtual coordinate region is back, so
+    /// verify-and-retry is required. 3 attempts, 1.5s timeout, 150ms pauses.
+    case settling
+
+    var messagingTimeout: Float {
+        switch self {
+        case .fast: return 0.5
+        case .settling: return 1.5
+        }
+    }
+    var maxAttempts: Int {
+        switch self {
+        case .fast: return 1
+        case .settling: return 3
+        }
+    }
+    var interAttemptDelayNanos: UInt64 {
+        switch self {
+        case .fast: return 0
+        case .settling: return 150_000_000
+        }
+    }
+}
+
 /// Restoration backend abstraction. The production implementation uses
 /// `AXClient` from `Core/Accessibility/`; tests inject a fixture.
 public protocol RestorerBackend: Sendable {
     /// Enumerate currently-resolvable windows. Each tuple matches a window
     /// in the active OS state to its current frame + identity signal.
-    func enumerateLiveWindows() async throws -> [LiveWindow]
+    ///
+    /// `limitToBundleIDs` — when non-nil, only apps in the set are walked.
+    /// AX enumeration is serial with a 1s messaging timeout per app, so on a
+    /// system with dozens of running apps the full walk dominates restore
+    /// latency; a Space-switch restore only needs the apps its snapshot
+    /// entries name. `nil` = walk everything (capture does).
+    func enumerateLiveWindows(limitToBundleIDs: Set<String>?) async throws -> [LiveWindow]
     /// Move a window to a target frame. Returns `true` if the move
     /// completed; `false` if the user was interacting with the window
     /// (FR-012 cancellation).
-    func move(window: LiveWindow, to frame: CGRectCodable) async throws -> Bool
+    func move(window: LiveWindow, to frame: CGRectCodable, policy: MovePolicy) async throws -> Bool
     /// Enter or exit fullscreen on the specified display.
     func setFullscreen(window: LiveWindow, on displayFingerprintID: String) async throws -> Bool
+}
+
+public extension RestorerBackend {
+    /// Unfiltered enumeration, kept for capture-side callers.
+    func enumerateLiveWindows() async throws -> [LiveWindow] {
+        try await enumerateLiveWindows(limitToBundleIDs: nil)
+    }
 }
 
 /// A window currently present in the active OS state, paired with the
@@ -30,6 +84,10 @@ public struct LiveWindow: Sendable, Equatable {
     public let currentFrame: CGRectCodable
     public let currentDisplayFingerprintID: String
     public let isFullscreen: Bool
+    /// CoreGraphics window number, when the AX→CG bridge resolved it.
+    /// Required to address a single window for per-window Space relocation
+    /// (ADR-0002); `nil` falls back to the per-app relocation path.
+    public let windowID: CGWindowID?
 
     public init(
         opaqueID: ObjectIdentifier? = nil,
@@ -38,6 +96,7 @@ public struct LiveWindow: Sendable, Equatable {
         ordinalInApp: Int = 0,
         currentFrame: CGRectCodable,
         currentDisplayFingerprintID: String,
+        windowID: CGWindowID? = nil,
         isFullscreen: Bool
     ) {
         self.opaqueID = opaqueID
@@ -46,6 +105,7 @@ public struct LiveWindow: Sendable, Equatable {
         self.ordinalInApp = ordinalInApp
         self.currentFrame = currentFrame
         self.currentDisplayFingerprintID = currentDisplayFingerprintID
+        self.windowID = windowID
         self.isFullscreen = isFullscreen
     }
 }
@@ -141,9 +201,19 @@ public actor Restorer {
         _ snapshot: Snapshot,
         activeDisplayFingerprintIDs: Set<String>,
         currentDisplayBoundsByID: [String: CGRectCodable] = [:],
-        onlySpaceIndex: Int? = nil
+        onlySpaceIndex: Int? = nil,
+        movePolicy: MovePolicy = .fast
     ) async throws -> RestoreReport {
-        let live = try await backend.enumerateLiveWindows()
+        // Only apps named by the entries we'll consider need enumerating —
+        // live windows of other apps are left alone regardless (constructive
+        // matching), and the full AX walk is the dominant restore cost.
+        let relevantBundles: Set<String>
+        if let only = onlySpaceIndex {
+            relevantBundles = Set(snapshot.windows.lazy.filter { $0.spaceIndex == only }.map(\.bundleID))
+        } else {
+            relevantBundles = Set(snapshot.windows.map(\.bundleID))
+        }
+        let live = try await backend.enumerateLiveWindows(limitToBundleIDs: relevantBundles)
 
         // Re-anchoring: window frames are stored in GLOBAL desktop
         // coordinates, which are only valid while each display sits at the
@@ -191,10 +261,42 @@ public actor Restorer {
             entriesToConsider = snapshot.windows
         }
 
-        // Group live windows by (bundleID, identity), preserving an
-        // ordinal-sorted list per key for within-group pairing.
-        var liveByKey: [MatchKey: [LiveWindow]] = [:]
+        // PHASE 0 — windowID join. The CG window number is stable for the
+        // process lifetime of the owning app, so an entry whose windowID is
+        // alive RIGHT NOW identifies its window with an integer compare — no
+        // identity resolution, no ordinal heuristics, immune to the
+        // ordinal-shift and same-identity-group ambiguities below. Identity
+        // matching remains only for entries whose app restarted since
+        // capture (windowID gone) and legacy snapshots (windowID nil).
+        var liveByWindowID: [CGWindowID: LiveWindow] = [:]
         for w in live {
+            if let wid = w.windowID { liveByWindowID[wid] = w }
+        }
+        var pairedByWindowID: [(entry: WindowEntry, window: LiveWindow)] = []
+        var pairedLiveIDs: Set<CGWindowID> = []
+        var remainingEntries: [WindowEntry] = []
+        for entry in entriesToConsider {
+            if let wid = entry.windowID,
+               let liveWindow = liveByWindowID[wid],
+               liveWindow.bundleID == entry.bundleID,
+               !pairedLiveIDs.contains(wid) {
+                pairedByWindowID.append((entry, liveWindow))
+                pairedLiveIDs.insert(wid)
+            } else {
+                remainingEntries.append(entry)
+            }
+        }
+        // Windows claimed by the join are out of the identity pool — a
+        // window must not be movable twice under two different keys.
+        let identityLive = live.filter { w in
+            guard let wid = w.windowID else { return true }
+            return !pairedLiveIDs.contains(wid)
+        }
+
+        // Group the remaining live windows by (bundleID, identity),
+        // preserving an ordinal-sorted list per key for within-group pairing.
+        var liveByKey: [MatchKey: [LiveWindow]] = [:]
+        for w in identityLive {
             let key = MatchKey(bundleID: w.bundleID, identity: w.identity)
             liveByKey[key, default: []].append(w)
         }
@@ -202,9 +304,9 @@ public actor Restorer {
             liveByKey[k] = group.sorted { $0.ordinalInApp < $1.ordinalInApp }
         }
 
-        // Group snapshot entries the same way.
+        // Group the remaining snapshot entries the same way.
         var snapshotByKey: [MatchKey: [WindowEntry]] = [:]
-        for e in entriesToConsider {
+        for e in remainingEntries {
             let key = MatchKey(bundleID: e.bundleID, identity: e.identity)
             snapshotByKey[key, default: []].append(e)
         }
@@ -223,12 +325,12 @@ public actor Restorer {
         // pairs for this bundle preserves the user's current arrangement.
         var snapshotOrdinalCount: [String: Int] = [:]
         var liveOrdinalCount: [String: Int] = [:]
-        for entry in entriesToConsider {
+        for entry in remainingEntries {
             if case .ordinal = entry.identity {
                 snapshotOrdinalCount[entry.bundleID, default: 0] += 1
             }
         }
-        for w in live {
+        for w in identityLive {
             if case .ordinal = w.identity {
                 liveOrdinalCount[w.bundleID, default: 0] += 1
             }
@@ -253,6 +355,7 @@ public actor Restorer {
 
         DiagnosticLog.write("restore", """
             apply begin: entries=\(entriesToConsider.count) live=\(live.count) \
+            windowIDPaired=\(pairedByWindowID.count) identityFallback=\(remainingEntries.count) \
             onlySpaceIndex=\(String(describing: onlySpaceIndex)) \
             activeDisplays=\(activeDisplayFingerprintIDs.count)
             """)
@@ -275,7 +378,75 @@ public actor Restorer {
         // it as either an immediate skip (counted now) or a pending
         // backend action (queued for phase 2). Counters mutate only here.
         var pendingActions: [PendingAction] = []
-        for entry in entriesToConsider {
+
+        // Shared decide tail for both match routes: idempotence check,
+        // unmovable check, then queue the appropriate backend action.
+        func decide(entry: WindowEntry, liveWindow: LiveWindow, matchedBy: String) {
+            let targetFrame = reanchoredFrame(for: entry)
+
+            DiagnosticLog.write("restore", """
+                decide: PAIR[\(matchedBy)] bundle=\(entry.bundleID) identity=\(entry.identity) \
+                snapshotOrdinal=\(entry.ordinalInApp) liveOrdinal=\(liveWindow.ordinalInApp) \
+                liveFrame=(\(liveWindow.currentFrame.x),\(liveWindow.currentFrame.y),\
+                \(liveWindow.currentFrame.width)x\(liveWindow.currentFrame.height)) \
+                targetFrame=(\(targetFrame.x),\(targetFrame.y),\
+                \(targetFrame.width)x\(targetFrame.height)) \
+                savedFrame=(\(entry.frame.x),\(entry.frame.y)) \
+                snapshotSpaceIndex=\(entry.spaceIndex)
+                """)
+
+            // §III idempotence: don't move if already at recorded frame + state.
+            if liveWindow.currentDisplayFingerprintID == entry.displayFingerprintID,
+               liveWindow.currentFrame.isApproximately(targetFrame, tolerance: tolerancePoints),
+               liveWindow.isFullscreen == entry.isFullscreen {
+                skippedAlreadyAtFrame += 1
+                DiagnosticLog.write("restore", "decide: SKIP-IDEMPOTENT bundle=\(entry.bundleID)")
+                return
+            }
+
+            // System surfaces we never try to move (notificationcenterui,
+            // dock, WindowManager, controlcenter — see unmovableBundles).
+            if Self.unmovableBundles.contains(entry.bundleID) {
+                skippedMissingWindow += 1
+                DiagnosticLog.write("restore", """
+                    decide: SKIP-UNMOVABLE bundle=\(entry.bundleID) \
+                    identity=\(entry.identity) — system-managed surface, not moving
+                    """)
+                return
+            }
+
+            let targetDisplayMissing = !activeDisplayFingerprintIDs.contains(entry.displayFingerprintID)
+            if targetDisplayMissing {
+                displacedNoMatchingDisplay += 1
+                pendingActions.append(.init(
+                    bundleID: entry.bundleID,
+                    window: liveWindow,
+                    kind: .moveDisplaced(target: entry.frame)
+                ))
+            } else if entry.isFullscreen {
+                fullscreenAttempts += 1
+                pendingActions.append(.init(
+                    bundleID: entry.bundleID,
+                    window: liveWindow,
+                    kind: .fullscreen(displayFingerprintID: entry.displayFingerprintID)
+                ))
+            } else {
+                pendingActions.append(.init(
+                    bundleID: entry.bundleID,
+                    window: liveWindow,
+                    kind: .move(target: targetFrame)
+                ))
+            }
+        }
+
+        // PHASE 1a — windowID-joined pairs: already matched exactly, no
+        // ordinal or grouping heuristics apply.
+        for (entry, liveWindow) in pairedByWindowID {
+            decide(entry: entry, liveWindow: liveWindow, matchedBy: "windowID")
+        }
+
+        // PHASE 1b — identity fallback for the rest.
+        for entry in remainingEntries {
             let key = MatchKey(bundleID: entry.bundleID, identity: entry.identity)
             let liveGroup = liveByKey[key] ?? []
 
@@ -311,61 +482,7 @@ public actor Restorer {
                 continue
             }
             let liveWindow = liveGroup[entryIndexInGroup]
-            let targetFrame = reanchoredFrame(for: entry)
-
-            DiagnosticLog.write("restore", """
-                decide: PAIR bundle=\(entry.bundleID) identity=\(entry.identity) \
-                snapshotOrdinal=\(entry.ordinalInApp) liveOrdinal=\(liveWindow.ordinalInApp) \
-                liveFrame=(\(liveWindow.currentFrame.x),\(liveWindow.currentFrame.y),\
-                \(liveWindow.currentFrame.width)x\(liveWindow.currentFrame.height)) \
-                targetFrame=(\(targetFrame.x),\(targetFrame.y),\
-                \(targetFrame.width)x\(targetFrame.height)) \
-                savedFrame=(\(entry.frame.x),\(entry.frame.y)) \
-                snapshotSpaceIndex=\(entry.spaceIndex)
-                """)
-
-            // §III idempotence: don't move if already at recorded frame + state.
-            if liveWindow.currentDisplayFingerprintID == entry.displayFingerprintID,
-               liveWindow.currentFrame.isApproximately(targetFrame, tolerance: tolerancePoints),
-               liveWindow.isFullscreen == entry.isFullscreen {
-                skippedAlreadyAtFrame += 1
-                DiagnosticLog.write("restore", "decide: SKIP-IDEMPOTENT bundle=\(entry.bundleID)")
-                continue
-            }
-
-            // System surfaces we never try to move (notificationcenterui,
-            // dock, WindowManager, controlcenter — see unmovableBundles).
-            if Self.unmovableBundles.contains(entry.bundleID) {
-                skippedMissingWindow += 1
-                DiagnosticLog.write("restore", """
-                    decide: SKIP-UNMOVABLE bundle=\(entry.bundleID) \
-                    identity=\(entry.identity) — system-managed surface, not moving
-                    """)
-                continue
-            }
-
-            let targetDisplayMissing = !activeDisplayFingerprintIDs.contains(entry.displayFingerprintID)
-            if targetDisplayMissing {
-                displacedNoMatchingDisplay += 1
-                pendingActions.append(.init(
-                    bundleID: entry.bundleID,
-                    window: liveWindow,
-                    kind: .moveDisplaced(target: entry.frame)
-                ))
-            } else if entry.isFullscreen {
-                fullscreenAttempts += 1
-                pendingActions.append(.init(
-                    bundleID: entry.bundleID,
-                    window: liveWindow,
-                    kind: .fullscreen(displayFingerprintID: entry.displayFingerprintID)
-                ))
-            } else {
-                pendingActions.append(.init(
-                    bundleID: entry.bundleID,
-                    window: liveWindow,
-                    kind: .move(target: targetFrame)
-                ))
-            }
+            decide(entry: entry, liveWindow: liveWindow, matchedBy: "identity")
         }
 
         // PHASE 2 — Execute concurrently. AX moves are serialized at the
@@ -381,12 +498,12 @@ public actor Restorer {
                     do {
                         switch action.kind {
                         case .move(let target):
-                            let didMove = try await backendRef.move(window: action.window, to: target)
+                            let didMove = try await backendRef.move(window: action.window, to: target, policy: movePolicy)
                             DiagnosticLog.write("restore",
                                 "decide: MOVE bundle=\(action.bundleID) didMove=\(didMove)")
                             return didMove ? .moved : .cancelled
                         case .moveDisplaced(let target):
-                            let didMove = try await backendRef.move(window: action.window, to: target)
+                            let didMove = try await backendRef.move(window: action.window, to: target, policy: movePolicy)
                             DiagnosticLog.write("restore",
                                 "decide: MOVE-DISPLACED bundle=\(action.bundleID) didMove=\(didMove)")
                             return didMove ? .movedDisplaced : .cancelledDisplaced

@@ -210,7 +210,8 @@ public final class AppLifecycle {
                         currentDisplayBoundsByID: Dictionary(
                             enumerator.enumerate().map { ($0.fingerprint.id, $0.bounds) },
                             uniquingKeysWith: { first, _ in first }),
-                        onlySpaceIndex: activeSpace
+                        onlySpaceIndex: activeSpace,
+                        movePolicy: .settling   // displays re-attaching — AX clamps silently
                     )
                     statusModel.lastRestore = Date()
                     statusModel.lastRestoreMoved = report.moved
@@ -372,7 +373,8 @@ public final class AppLifecycle {
                     currentDisplayBoundsByID: Dictionary(
                         enumeratorStart.enumerate().map { ($0.fingerprint.id, $0.bounds) },
                         uniquingKeysWith: { first, _ in first }),
-                    onlySpaceIndex: activeSpace
+                    onlySpaceIndex: activeSpace,
+                    movePolicy: .settling   // login items still creating windows
                 )
                 statusModelStart.lastRestore = Date()
                 statusModelStart.lastRestoreMoved = report.moved
@@ -403,37 +405,43 @@ public final class AppLifecycle {
     /// re-establishing — macOS silently clamped the target frame to the
     /// main display and the window appeared not to move.
     private func handleSpaceChange(to spaceIndex: Int) {
-        // The restore gate for this Space: OPEN on the first visit since the
-        // last real wake (layout may be displaced), CLOSED on every later
-        // visit (the user owns the layout). Read it BEFORE recording the visit.
-        let gateOpen = eventLog.shouldRestoreOnSwitch(toSpaceIndex: spaceIndex)
-        let shouldRestore = statusModel.restoreOnSpaceSwitch && gateOpen
+        // Restore on EVERY visit, not just the first one after a wake.
+        //
+        // The old wake gate ("first visit restores, later visits are owned
+        // by the user") existed to keep auto-capture and auto-restore from
+        // fighting each other. Auto-capture is gone — the snapshot is always
+        // a layout the user chose by clicking Capture — so a Space visit
+        // snapping windows back to that layout IS the product now. §III
+        // idempotence keeps repeat visits free: windows already at their
+        // frame are skipped without an AX write.
+        //
+        // Tradeoff, stated plainly: a window you move and DON'T recapture
+        // will snap back on the next visit to that Space. That's "window
+        // memory" doing its job; recapture is one click.
+        let shouldRestore = statusModel.restoreOnSpaceSwitch
         let previouslyVisited = eventLog.lastVisited(spaceIndex: spaceIndex)
         eventLog.recordSpaceVisit(spaceIndex: spaceIndex)
         LoggerRegistry.app.log(.info,
-            "Space changed to index=\(spaceIndex); previously visited=\(previouslyVisited?.description ?? "never"); gateOpen=\(gateOpen); will-restore=\(shouldRestore)")
+            "Space changed to index=\(spaceIndex); previously visited=\(previouslyVisited?.description ?? "never"); will-restore=\(shouldRestore)")
 
         // License gate. If the state blocks auto features (expired/revoked
-        // license, trial expired), skip both the Space-switch capture AND
-        // the Space-switch restore — the only path that still runs is
-        // manual Capture/Restore (and only those if `allowsManualFeatures`).
+        // license, trial expired), skip the Space-switch restore — the only
+        // path that still runs is manual Capture/Restore (and only those if
+        // `allowsManualFeatures`).
         guard allowsAutoFeatures else {
-            DiagnosticLog.write("capture",
-                "SKIP Space-switch capture+restore for space=\(spaceIndex): license state blocks auto features")
+            DiagnosticLog.write("restore",
+                "SKIP Space-switch restore for space=\(spaceIndex): license state blocks auto features")
             return
         }
 
-        // Capture and restore are mutually exclusive per switch, keyed on the
-        // restore gate:
-        //   gate CLOSED → the user already owns this Space's layout since the
-        //                 last wake. Do NOTHING. (Auto-capture is removed — it
-        //                 used to fire here and overwrite the saved layout with
-        //                 whatever was on screen. Capture is manual-only now.)
-        //   gate OPEN   → first visit since wake: RESTORE only.
-        guard gateOpen else { return }
-
-        // Gate open: restore only.
-        guard shouldRestore else { return }
+        // Every skip writes to the diagnostic log. The wake-gate era skipped
+        // silently, which cost a debugging session: "restore didn't work"
+        // with an empty log is indistinguishable from "restore never ran".
+        guard shouldRestore else {
+            DiagnosticLog.write("restore",
+                "SKIP Space-switch restore for space=\(spaceIndex): auto-restore toggle is off")
+            return
+        }
 
         let configID = displayEnumerator.configurationID()
         Task { @MainActor [weak self] in
@@ -674,6 +682,129 @@ public final class AppLifecycle {
     }
 
 
+    /// Restore windows to the **Spaces** they were captured on, then restore
+    /// their frames across every Space (ADR-0002).
+    ///
+    /// Unlike `restoreNow()`, which deliberately touches only the active Space,
+    /// this is the full cross-Space restore. Relocation runs first so that the
+    /// frame pass finds each window already on its destination Space.
+    ///
+    /// The relocation mechanism is process-scoped: an app whose windows were
+    /// captured on several Spaces cannot be fully reproduced, and those windows
+    /// are reported as displaced rather than silently mis-placed.
+    public func restoreSpaces() {
+        Task { @MainActor in
+            guard allowsManualFeatures else {
+                statusModel.lastError = "License required. Open menu bar → License… to activate or start a trial."
+                DiagnosticLog.write("restore-spaces", "BLOCKED: license state = \(licenseValidator.state)")
+                return
+            }
+            guard spaceResolver.canRelocateAcrossSpaces else {
+                statusModel.lastError = "This macOS doesn't expose the Space-relocation API. "
+                    + "Windows can still be restored to their display and frame via Restore now."
+                LoggerRegistry.app.log(.info, "Restore Spaces unavailable: CGSProcessAssignToSpace missing")
+                return
+            }
+            // ADR-0003: this project targets one display configuration. With
+            // several managed Space sets a stored Space index doesn't identify
+            // which display it came from, and a guess scatters windows onto a
+            // Space the user never picked. Refuse, and say why.
+            guard spaceResolver.hasSupportedSpaceConfiguration else {
+                statusModel.lastError = "Restoring Spaces needs Spaces that span your displays. "
+                    + "Turn off System Settings → Desktop & Dock → \"Displays have separate Spaces\", "
+                    + "or use Restore now, which is unaffected."
+                DiagnosticLog.write("restore-spaces", "REFUSED: multiple managed Space sets (ADR-0003)")
+                LoggerRegistry.app.log(.info, "Restore Spaces refused: unsupported display/Spaces configuration")
+                return
+            }
+            do {
+                let configID = displayEnumerator.configurationID()
+                guard let snap = try snapshotStore.loadLatest(forConfigurationID: configID) else {
+                    statusModel.lastError = "No snapshot exists for the current display configuration (\(configID)). Capture first."
+                    return
+                }
+
+                // Prefer per-window relocation (yabai) when it's available;
+                // otherwise the always-present per-app backend.
+                let backend = SpaceRelocationBackendFactory.best()
+                let assigner = SpaceAssigner(backend: backend)
+                LoggerRegistry.app.log(.info, "Restore Spaces backend: \(backend.name)")
+
+                var notes: [String] = []
+                var relocatedCount = 0
+                var failedCount = 0
+
+                if assigner.supportsPerWindowMoves {
+                    // Per-window: deep identity decides which window of an app
+                    // goes where, so two Brave windows can land on different
+                    // Spaces — the case the per-app backend cannot express.
+                    let live = try await restorerBackend.enumerateLiveWindows()
+                    let moves = SpaceAssignmentPlanner.perWindowMoves(snapshot: snap.windows, live: live)
+                    let unlanded = assigner.applyPerWindow(moves)
+                    relocatedCount = moves.count - unlanded.count
+                    failedCount = unlanded.count
+                    for move in unlanded {
+                        DiagnosticLog.write("restore-spaces",
+                            "\(move.bundleID) window \(move.windowID) -> space \(move.targetSpaceIndex): did not land")
+                    }
+                    if failedCount > 0 {
+                        notes.append("\(failedCount) window(s) couldn't be moved — see Settings → Snapshots.")
+                    }
+                } else {
+                    let plan = SpaceAssignmentPlanner.plan(for: snap.windows)
+                    let outcomes = assigner.apply(plan)
+                    let failed = outcomes.filter { !$0.applied }
+                    relocatedCount = outcomes.count - failed.count
+                    failedCount = failed.count
+
+                    for outcome in failed {
+                        DiagnosticLog.write("restore-spaces",
+                            "\(outcome.bundleID) -> space \(outcome.targetSpaceIndex): \(outcome.failureReason ?? "unknown")")
+                    }
+                    // Surface the process-scoped limit plainly — a partial
+                    // restore the user isn't told about reads as a bug.
+                    if plan.totalDisplaced > 0 {
+                        let apps = plan.partial.map(\.bundleID).joined(separator: ", ")
+                        notes.append("\(plan.totalDisplaced) window(s) couldn't be placed: "
+                            + "\(apps) had windows on more than one Space, and macOS moves an app's "
+                            + "windows together. Install yabai for per-window Spaces.")
+                    }
+                    if failedCount > 0 {
+                        notes.append("\(failedCount) app(s) couldn't be relocated — see Settings → Snapshots.")
+                    }
+                }
+
+                // Relocation is asynchronous in the window server; give it a
+                // beat before AX starts reading frames, or the frame pass can
+                // race a window that is still mid-move.
+                try? await Task.sleep(nanoseconds: 250_000_000)
+
+                let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
+                let report = try await restorer.apply(
+                    snap,
+                    activeDisplayFingerprintIDs: activeIDs,
+                    currentDisplayBoundsByID: currentDisplayBoundsByID(),
+                    onlySpaceIndex: nil            // every Space, not just the active one
+                )
+
+                statusModel.lastRestore = Date()
+                statusModel.lastRestoreMoved = report.moved
+                statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
+                statusModel.lastRestoreDisplaced = report.displacedNoMatchingDisplay
+
+                statusModel.lastError = notes.isEmpty ? nil : notes.joined(separator: " ")
+
+                LoggerRegistry.app.log(.info,
+                    "Restore Spaces via \(backend.name): relocated=\(relocatedCount) "
+                    + "failed=\(failedCount) frames moved=\(report.moved)")
+            } catch {
+                let msg = Self.describe(error: error, operation: "restore Spaces")
+                statusModel.lastError = msg
+                LoggerRegistry.app.log(.error, "Restore Spaces failed: \(error)")
+            }
+        }
+    }
+
     /// Apply a specific historical slot (0 = current, 1..N = older).
     /// Used by the Restore Picker UI.
     public func restoreFromSlot(_ slot: Int) {
@@ -770,8 +901,10 @@ public final class AXRestorerBackend: RestorerBackend, @unchecked Sendable {
     /// move/fullscreen handlers can recover the exact AX element without
     /// re-enumerating and without falling victim to the identity-collision
     /// bug that caused windows to "disappear" on restore.
-    private func resolveLiveWindows() async throws -> ([LiveWindow], [AXKey: AXWindow]) {
-        let axWindows = try await axClient.enumerateWindows()
+    private func resolveLiveWindows(
+        limitToBundleIDs: Set<String>? = nil
+    ) async throws -> ([LiveWindow], [AXKey: AXWindow]) {
+        let axWindows = try await axClient.enumerateWindows(limitToBundleIDs: limitToBundleIDs)
         let displays = displayEnumerator.enumerate()
         let resolver = WindowIdentityResolver.defaultV1()
 
@@ -803,12 +936,16 @@ public final class AXRestorerBackend: RestorerBackend, @unchecked Sendable {
                 appProviderIdentity: appProviderIdentity,
                 creationOrdinal: axw.creationOrdinal
             ))
+            // CGWindowID enables per-window Space relocation (ADR-0002) and
+            // windowID-first restore matching. Pre-fetched at enumeration.
+            let cgWindowID = axw.windowID
             live.append(LiveWindow(
                 bundleID: axw.bundleID,
                 identity: identity,
                 ordinalInApp: axw.creationOrdinal,
                 currentFrame: frame,
                 currentDisplayFingerprintID: displayFingerprintID,
+                windowID: cgWindowID,
                 isFullscreen: axw.isFullscreen
             ))
             byKey[AXKey(
@@ -828,19 +965,59 @@ public final class AXRestorerBackend: RestorerBackend, @unchecked Sendable {
         )
     }
 
-    public func enumerateLiveWindows() async throws -> [LiveWindow] {
-        let (live, _) = try await resolveLiveWindows()
+    // MARK: - AX element cache
+    //
+    // `move()`/`setFullscreen()` used to call `resolveLiveWindows()` — a
+    // full AX enumeration plus per-app AppleScript — PER WINDOW MOVED, so a
+    // restore that moved N windows walked the world N+1 times. That, not
+    // the moves themselves (2–4 ms each), was the bulk of the minute-long
+    // restores. `Restorer.apply` always enumerates through this same
+    // backend before it moves anything, so the elements resolved there are
+    // fresh; cache them and look up by CG window number (exact), falling
+    // back to the composite key for windows without one.
+    private let cacheLock = NSLock()
+    private var cachedByKey: [AXKey: AXWindow] = [:]
+    private var cachedByWindowID: [CGWindowID: AXWindow] = [:]
+
+    private func cachedAXWindow(for window: LiveWindow) -> AXWindow? {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        if let wid = window.windowID, let axw = cachedByWindowID[wid] { return axw }
+        return cachedByKey[keyFor(window)]
+    }
+
+    /// Synchronous so the NSLock critical section contains no suspension
+    /// points (Swift 6 forbids lock()/unlock() across awaits).
+    private func updateCache(byKey: [AXKey: AXWindow]) {
+        cacheLock.lock(); defer { cacheLock.unlock() }
+        cachedByKey = byKey
+        cachedByWindowID = Dictionary(
+            byKey.values.compactMap { axw in axw.windowID.map { ($0, axw) } },
+            uniquingKeysWith: { first, _ in first }
+        )
+    }
+
+    public func enumerateLiveWindows(limitToBundleIDs: Set<String>?) async throws -> [LiveWindow] {
+        let (live, byKey) = try await resolveLiveWindows(limitToBundleIDs: limitToBundleIDs)
+        updateCache(byKey: byKey)
         return live
     }
 
-    public func move(window: LiveWindow, to frame: CGRectCodable) async throws -> Bool {
-        let (_, byKey) = try await resolveLiveWindows()
+    public func move(window: LiveWindow, to frame: CGRectCodable, policy: MovePolicy) async throws -> Bool {
+        if let axWindow = cachedAXWindow(for: window) {
+            return try await axClient.move(axWindow, to: frame, policy: policy)
+        }
+        // Cache miss — caller skipped enumeration or the window is gone.
+        // One fresh resolve, scoped to the one app that matters.
+        let (_, byKey) = try await resolveLiveWindows(limitToBundleIDs: [window.bundleID])
         guard let axWindow = byKey[keyFor(window)] else { return false }
-        return try await axClient.move(axWindow, to: frame)
+        return try await axClient.move(axWindow, to: frame, policy: policy)
     }
 
     public func setFullscreen(window: LiveWindow, on displayFingerprintID: String) async throws -> Bool {
-        let (_, byKey) = try await resolveLiveWindows()
+        if let axWindow = cachedAXWindow(for: window) {
+            return try await axClient.setFullscreen(axWindow, true)
+        }
+        let (_, byKey) = try await resolveLiveWindows(limitToBundleIDs: [window.bundleID])
         guard let axWindow = byKey[keyFor(window)] else { return false }
         return try await axClient.setFullscreen(axWindow, true)
     }

@@ -18,6 +18,13 @@ public struct WindowEntry: Codable, Hashable, Sendable {
     public let isMinimized: Bool
     public let isFullscreen: Bool
     public let capturedAt: Date
+    /// CoreGraphics window number at capture time. Stable for the process
+    /// lifetime of the owning app, so it is the PRIMARY restore match key:
+    /// an integer compare instead of identity resolution. `nil` in legacy
+    /// snapshots and when the AX→CG bridge is unavailable; matching then
+    /// falls back to identity. Meaningless after the owning app restarts —
+    /// the fallback covers that case too.
+    public let windowID: CGWindowID?
 
     public init(
         bundleID: String,
@@ -28,7 +35,8 @@ public struct WindowEntry: Codable, Hashable, Sendable {
         frame: CGRectCodable,
         isMinimized: Bool,
         isFullscreen: Bool,
-        capturedAt: Date
+        capturedAt: Date,
+        windowID: CGWindowID? = nil
     ) {
         self.bundleID = bundleID
         self.identity = identity
@@ -39,11 +47,12 @@ public struct WindowEntry: Codable, Hashable, Sendable {
         self.isMinimized = isMinimized
         self.isFullscreen = isFullscreen
         self.capturedAt = capturedAt
+        self.windowID = windowID
     }
 
     enum CodingKeys: String, CodingKey {
         case bundleID, identity, ordinalInApp, displayFingerprintID, spaceIndex,
-             frame, isMinimized, isFullscreen, capturedAt
+             frame, isMinimized, isFullscreen, capturedAt, windowID
     }
 
     public init(from decoder: Decoder) throws {
@@ -58,6 +67,8 @@ public struct WindowEntry: Codable, Hashable, Sendable {
         self.isMinimized = try c.decode(Bool.self, forKey: .isMinimized)
         self.isFullscreen = try c.decode(Bool.self, forKey: .isFullscreen)
         self.capturedAt = try c.decode(Date.self, forKey: .capturedAt)
+        // Post-all-Spaces-capture field; absent in legacy snapshots.
+        self.windowID = try c.decodeIfPresent(CGWindowID.self, forKey: .windowID)
     }
 }
 

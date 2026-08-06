@@ -23,6 +23,10 @@ public struct AXWindow: @unchecked Sendable {
     public let frame: CGRectCodable?
     public let isFullscreen: Bool
     public let isMinimized: Bool
+    /// CoreGraphics window number via `_AXUIElementGetWindow`, or `nil` if
+    /// the private bridge is unavailable. Stable for the process lifetime of
+    /// the owning app — the primary join key between AX, CG, and snapshots.
+    public let windowID: CGWindowID?
 
     public init(
         element: AXUIElement,
@@ -33,7 +37,8 @@ public struct AXWindow: @unchecked Sendable {
         documentURL: URL?,
         frame: CGRectCodable?,
         isFullscreen: Bool,
-        isMinimized: Bool
+        isMinimized: Bool,
+        windowID: CGWindowID? = nil
     ) {
         self.element = element
         self.bundleID = bundleID
@@ -44,5 +49,6 @@ public struct AXWindow: @unchecked Sendable {
         self.frame = frame
         self.isFullscreen = isFullscreen
         self.isMinimized = isMinimized
+        self.windowID = windowID
     }
 }
