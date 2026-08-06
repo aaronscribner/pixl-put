@@ -68,14 +68,16 @@ public final class DisplayConfigWatcher: @unchecked Sendable {
 
     private static let callback: CGDisplayReconfigurationCallBack = { _, flags, context in
         guard let context = context else { return }
-        // We care about the "after" event so the new configuration is queryable.
-        let isAfter = flags.contains(.addFlag)
-            || flags.contains(.removeFlag)
-            || flags.contains(.setMainFlag)
-            || flags.contains(.setModeFlag)
-            || flags.contains(.enabledFlag)
-            || flags.contains(.disabledFlag)
-        guard isAfter else { return }
+        // macOS invokes this twice per change: BEFORE with
+        // `beginConfigurationFlag`, and AFTER with whatever change flags
+        // apply. The canonical filter is "skip the begin call, act on
+        // everything else". An earlier revision instead required specific
+        // change flags (add/remove/setMode/…), which silently dropped
+        // after-callbacks carrying NO flags — exactly what a
+        // mode-preserving DisplayPort link renegotiation (Odyssey G9
+        // backlight sleep/wake) delivers. Downstream debouncing absorbs
+        // the extra per-display callbacks this now lets through.
+        guard !flags.contains(.beginConfigurationFlag) else { return }
 
         let watcher = Unmanaged<DisplayConfigWatcher>.fromOpaque(context).takeUnretainedValue()
         watcher.lock.lock()
