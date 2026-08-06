@@ -23,6 +23,18 @@ public struct SpaceResolver: Sendable {
     /// required for Phase B (capture windows on inactive Spaces).
     public var isCrossSpaceAware: Bool { PrivateCGS.isCrossSpaceAware }
 
+    /// `true` when windows of other apps can be relocated across Spaces
+    /// (ADR-0002). Gates the Restore Spaces command in the menu bar.
+    public var canRelocateAcrossSpaces: Bool { PrivateCGS.canRelocateAcrossSpaces }
+
+    /// `true` when the host presents exactly one managed Space set — the only
+    /// display/Spaces configuration this project supports (ADR-0003).
+    ///
+    /// False means "displays have separate Spaces" is on with more than one
+    /// display, where a stored Space index doesn't say which display it
+    /// belongs to. Space relocation refuses rather than guessing.
+    public var hasSupportedSpaceConfiguration: Bool { PrivateCGS.isSingleManagedSpaceSet }
+
     /// Best-effort active-space ID. Returns 0 in degraded mode.
     public func activeSpaceIndex() -> Int {
         guard let id = PrivateCGS.activeSpaceID() else { return 0 }
@@ -48,9 +60,18 @@ public struct SpaceResolver: Sendable {
     /// to 0 in degraded mode — the caller treats that as "active Space"
     /// which is the safe default for the wake-restore code path.
     public func spaceIndex(forWindowID windowID: CGWindowID) -> Int {
+        spaceIndexIfKnown(forWindowID: windowID) ?? 0
+    }
+
+    /// Like `spaceIndex(forWindowID:)` but honest about ignorance: `nil`
+    /// when CGS is degraded or the window reports no Space (sticky
+    /// all-Spaces windows, windows mid-teardown). The all-Spaces capture
+    /// pass uses this — recording an unknown as "Space 0" would pile every
+    /// unqueryable window onto the first Space.
+    public func spaceIndexIfKnown(forWindowID windowID: CGWindowID) -> Int? {
         let spaceIDs = PrivateCGS.spaces(forWindow: windowID)
-        guard let first = spaceIDs.first else { return 0 }
-        return mapToPerDisplayIndex(spaceID: first, displayUUID: nil) ?? 0
+        guard let first = spaceIDs.first else { return nil }
+        return mapToPerDisplayIndex(spaceID: first, displayUUID: nil)
     }
 
     /// Map a CGS Space ID to a per-display index when we know the display.

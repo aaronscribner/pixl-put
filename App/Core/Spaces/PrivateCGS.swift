@@ -34,6 +34,25 @@ enum PrivateCGS {
         CGSConnectionID, UInt32, CFArray
     ) -> Unmanaged<CFArray>?
 
+    /// `CGSProcessAssignToSpace(connection, pid, CGSSpaceID)`
+    ///
+    /// The only mechanism that relocates windows belonging to *another*
+    /// process across Spaces (ADR-0002). The per-window calls
+    /// (`CGSMoveWindowsToManagedSpace`, `CGSAddWindowsToSpaces`) are gated on
+    /// CGS connection ownership and silently do nothing for foreign windows —
+    /// measured 0/6 on macOS 26.2. This one is not.
+    ///
+    /// Two properties the caller must design around:
+    /// - **Process-scoped.** Every window of `pid` moves. One app's windows
+    ///   cannot be split across Spaces.
+    /// - **Sticky for the process lifetime.** Windows opened afterwards also
+    ///   land on the assigned Space, like Dock → Options → "Assign To". It is
+    ///   pid state, not a saved preference: it clears when the app quits, and
+    ///   there is no unassign symbol.
+    typealias CGSProcessAssignToSpaceFn = @convention(c) (
+        CGSConnectionID, pid_t, CGSSpaceID
+    ) -> Void
+
     // MARK: - Resolved function pointers (lazily loaded)
 
     private static let resolveLock = NSLock()
@@ -44,6 +63,7 @@ enum PrivateCGS {
         let getActiveSpace: CGSGetActiveSpaceFn?
         let copyManagedDisplaySpaces: CGSCopyManagedDisplaySpacesFn?
         let copySpacesForWindows: CGSCopySpacesForWindowsFn?
+        let processAssignToSpace: CGSProcessAssignToSpaceFn?
     }
 
     private static func symbols() -> ResolvedSymbols {
@@ -55,7 +75,8 @@ enum PrivateCGS {
             mainConnectionID: loadSymbol("CGSMainConnectionID"),
             getActiveSpace: loadSymbol("CGSGetActiveSpace"),
             copyManagedDisplaySpaces: loadSymbol("CGSCopyManagedDisplaySpaces"),
-            copySpacesForWindows: loadSymbol("CGSCopySpacesForWindows")
+            copySpacesForWindows: loadSymbol("CGSCopySpacesForWindows"),
+            processAssignToSpace: loadSymbol("CGSProcessAssignToSpace")
         )
         resolved = result
         return result
@@ -137,6 +158,76 @@ enum PrivateCGS {
     /// Lighter wrapper for the common "what Space is THIS window on" query.
     static func spaces(forWindow windowID: CGWindowID) -> [CGSSpaceID] {
         spacesForWindows([windowID])[windowID] ?? []
+    }
+
+    /// The ordered Space IDs of every managed display, keyed by display UUID.
+    /// Index into the array is the per-display Space index used on disk.
+    static func orderedSpaceIDs(forDisplayUUID uuid: String) -> [CGSSpaceID] {
+        managedDisplaySpaces()[uuid] ?? []
+    }
+
+    /// Whether the host presents exactly one managed Space set — the only
+    /// configuration this project supports (ADR-0003).
+    ///
+    /// True for a single display, and for the target hardware: a Samsung
+    /// Odyssey G9 in dual-4K, which macOS exposes as two logical displays but
+    /// which — with `com.apple.spaces spans-displays = 1` — CGS reports as one
+    /// managed display named `"Main"` whose Spaces span the whole panel.
+    ///
+    /// When this is false, a bare Space *index* is ambiguous: every managed
+    /// display's set has an index 0, and nothing in the index identifies which
+    /// set was meant.
+    static var isSingleManagedSpaceSet: Bool {
+        managedDisplaySpaces().count == 1
+    }
+
+    /// The Space ID at `index`, or `nil` when the answer would be a guess.
+    ///
+    /// `displayUUID` — a CGS `"Display Identifier"`, **not** a PixPut
+    /// `DisplayFingerprint.id` — resolves the index directly when supplied.
+    /// Without it, the index is only meaningful if exactly one managed Space
+    /// set exists (ADR-0003).
+    ///
+    /// This deliberately refuses rather than picking a display when the
+    /// configuration is unsupported. The previous behaviour iterated an
+    /// unordered dictionary and returned the first set containing the index,
+    /// which is a coin flip across process launches — and a wrong answer here
+    /// scatters an app's windows onto a Space the user never chose.
+    ///
+    /// An **unrecognised** `displayUUID` is ignored rather than refused: with
+    /// one managed set there is only one meaning an index can have, so the
+    /// lone set still answers. That keeps a stale or wrong-namespace hint
+    /// (e.g. a `DisplayFingerprint.id`) from breaking restore on the supported
+    /// hardware, while a genuinely ambiguous host still refuses.
+    static func spaceID(atIndex index: Int, displayUUID: String?) -> CGSSpaceID? {
+        guard index >= 0 else { return nil }
+        let byDisplay = managedDisplaySpaces()
+
+        if let uuid = displayUUID, let spaces = byDisplay[uuid] {
+            return index < spaces.count ? spaces[index] : nil
+        }
+        // No usable display hint: only unambiguous when there is one set to mean.
+        guard byDisplay.count == 1, let spaces = byDisplay.values.first else { return nil }
+        return index < spaces.count ? spaces[index] : nil
+    }
+
+    /// Assign every window of `pid` to `spaceID`. Returns `false` when the
+    /// symbol is unavailable — the caller degrades to frame-only restore.
+    /// The call itself returns void and reports nothing, so callers that need
+    /// certainty must verify via `spaces(forWindow:)`.
+    @discardableResult
+    static func assignProcess(pid: pid_t, toSpaceID spaceID: CGSSpaceID) -> Bool {
+        let s = symbols()
+        guard let conn = s.mainConnectionID?(), let assign = s.processAssignToSpace else {
+            return false
+        }
+        assign(conn, pid, spaceID)
+        return true
+    }
+
+    /// Whether cross-Space relocation is possible on this host.
+    static var canRelocateAcrossSpaces: Bool {
+        symbols().processAssignToSpace != nil && symbols().mainConnectionID != nil
     }
 
     /// Available iff the core private symbols resolved. Used by the
