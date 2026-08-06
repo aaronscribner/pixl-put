@@ -50,6 +50,13 @@ public final class AppLifecycle {
     /// capture for every intermediate Space — only for the one the user
     /// actually dwells on).
     private var pendingSpaceCaptureTask: Task<Void, Never>?
+    /// The in-flight Space-switch restore (300/500/1000ms retry loop).
+    /// Cancelled when a newer Space switch supersedes it, and by ANY capture:
+    /// a capture declares the current layout authoritative, and a pending
+    /// restore armed milliseconds earlier would load the pre-capture
+    /// snapshot and yank windows back to the layout the user just replaced
+    /// (measured 2026-08-06 18:13:37 — capture and stale restore 3ms apart).
+    private var pendingSpaceRestoreTask: Task<Void, Never>?
 
     /// True when the bundled Ed25519 public key is still the placeholder —
     /// i.e., licensing isn't actually configured for this build. In that
@@ -444,7 +451,8 @@ public final class AppLifecycle {
         }
 
         let configID = displayEnumerator.configurationID()
-        Task { @MainActor [weak self] in
+        pendingSpaceRestoreTask?.cancel()
+        pendingSpaceRestoreTask = Task { @MainActor [weak self] in
             guard let self = self else { return }
             // Retry-with-back-off instead of a flat 1.5s wait. First
             // attempt fires after just 300ms — most Spaces animations
@@ -458,6 +466,14 @@ public final class AppLifecycle {
             for delayMs in delaysMs {
                 attempt += 1
                 try? await Task.sleep(nanoseconds: delayMs * 1_000_000)
+                // Cancelled = superseded by a newer Space switch or by a
+                // capture. Applying anyway would restore a snapshot the
+                // user has already replaced.
+                if Task.isCancelled {
+                    DiagnosticLog.write("restore",
+                        "SKIP Space-switch restore for space=\(spaceIndex): superseded (newer switch or capture)")
+                    return
+                }
                 if isScreenLockedNow() {
                     DiagnosticLog.write("restore",
                         "SKIP Space-switch restore for space=\(spaceIndex): screen is locked")
@@ -589,6 +605,8 @@ public final class AppLifecycle {
         licenseValidator.stop()
         pendingSpaceCaptureTask?.cancel()
         pendingSpaceCaptureTask = nil
+        pendingSpaceRestoreTask?.cancel()
+        pendingSpaceRestoreTask = nil
         if let observer = spaceChangeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             spaceChangeObserver = nil
@@ -603,6 +621,13 @@ public final class AppLifecycle {
                 DiagnosticLog.write("capture", "BLOCKED manual capture: license state = \(licenseValidator.state)")
                 return
             }
+            // Capture declares the CURRENT layout authoritative. A restore
+            // scheduled by the Space switch the user made moments ago must
+            // not fire mid-capture (moving windows while frames are being
+            // read) or after it (loading the pre-capture snapshot and
+            // yanking windows back to the layout just replaced).
+            pendingSpaceRestoreTask?.cancel()
+            pendingSpaceRestoreTask = nil
             do {
                 let snap = try await snapshotEngine.capture(
                     trigger: .manual,
