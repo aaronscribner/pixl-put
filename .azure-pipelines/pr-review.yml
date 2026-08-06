@@ -1,0 +1,64 @@
+# Claude Code: PR review pipeline
+#
+# Ships from @cerebral-juice-co/claude-agents. Skip-if-exists at install
+# time, so you can customise variable groups, pool, and triggers in
+# place without losing edits across package upgrades.
+#
+# Trigger model: invoke this pipeline on PR open / update. In Azure DevOps,
+# pull-request triggers are configured via the Branch policy "Build
+# validation" + this pipeline. Adjust the `pr:` block below if you want
+# this to live on the PR pipeline directly.
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  # Override per project: variable group name that holds CLAUDE_API_KEY.
+  - group: claude-code-secrets
+  - name: nodeVersion
+    value: '20.x'
+
+stages:
+  - stage: PRReview
+    displayName: Claude PR review
+    jobs:
+      - job: PRReview
+        displayName: /pr-review
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+            displayName: Install Node.js
+
+          - script: |
+              npm install -g @anthropic-ai/claude-code
+            displayName: Install Claude Code CLI
+
+          - script: |
+              set -euo pipefail
+              PR_ID="$(System.PullRequest.PullRequestId)"
+              if [ -z "$PR_ID" ]; then
+                echo "##vso[task.logissue type=error]Not running in PR context."
+                exit 1
+              fi
+              claude --print "/pr-review $PR_ID" \
+                --output-format stream-json \
+                > pr-review.jsonl
+            displayName: Run /pr-review
+            env:
+              ANTHROPIC_API_KEY: $(CLAUDE_API_KEY)
+
+          - publish: pr-review.jsonl
+            artifact: pr-review-log
+            displayName: Publish review log

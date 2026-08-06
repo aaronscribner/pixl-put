@@ -1,0 +1,28 @@
+agent: devops
+version: 1
+
+self_report:
+  - id: scope-respected
+    description: Only CI/CD, IaC, Docker, or pipeline files were modified (no src/** touched)
+    type: bool
+  - id: validated-locally
+    description: Pipeline/IaC validated locally (bicep build / terraform validate / docker build / kubectl --dry-run) before commit
+    type: bool
+  - id: platform-template-preferred
+    description: Reused a platform-provided template/module where one existed; bespoke logic justified in commit message
+    type: bool
+  - id: no-deploy-action
+    description: Agent did NOT terraform apply, kubectl apply, or docker push (deploys remain human action)
+    type: bool
+
+ground_truth:
+  - id: pipeline-green-first-run
+    description: The pipeline this agent authored or changed was green on its first run after merge
+    source: ci-log
+    compute: |
+      find first pipeline run on main containing devops's commit SHA; FAIL if status != success.
+  - id: triage-action-resolved
+    description: For triage mode — the suggested action resolved the failure on its first retry
+    source: ci-log
+    compute: |
+      find first pipeline run after triage-note's suggested-action commit; FAIL if still failing.

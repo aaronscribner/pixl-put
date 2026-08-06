@@ -1,0 +1,100 @@
+# Claude Code: weekly cleanup pipeline
+#
+# Scheduled weekly sweep:
+#   1. Documentation agent refreshes README, CHANGELOG, ADR index from
+#      recent merges into main.
+#   2. Surfaces stale TODOs (older than 90 days) for triage.
+#   3. Surfaces draft specs (specs/draft-*) that haven't been promoted
+#      or closed in 30+ days.
+#
+# Does NOT push commits — outputs a summary the human team reviews on
+# Monday. Configure the schedule below for your team's timezone.
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: '0 6 * * 1'    # Mondays at 06:00 UTC
+    displayName: Weekly Monday sweep
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: claude-code-secrets
+  - name: nodeVersion
+    value: '20.x'
+
+stages:
+  - stage: WeeklyCleanup
+    displayName: Weekly factory hygiene
+    jobs:
+      - job: DocsRefresh
+        displayName: /update-docs (sweep)
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+            displayName: Install Node.js
+
+          - script: |
+              npm install -g @anthropic-ai/claude-code
+            displayName: Install Claude Code CLI
+
+          - script: |
+              set -euo pipefail
+              # Doc sweep on the past week of main.
+              claude --print "/update-docs main-since-1week" \
+                --output-format stream-json \
+                > update-docs.jsonl
+            displayName: Run /update-docs
+            env:
+              ANTHROPIC_API_KEY: $(CLAUDE_API_KEY)
+
+          - publish: update-docs.jsonl
+            artifact: weekly-update-docs-log
+            displayName: Publish update-docs log
+
+      - job: StaleSweep
+        displayName: TODO + draft-spec sweep
+        dependsOn: []
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - script: |
+              set -euo pipefail
+              echo "## Stale TODOs (>90 days)"
+              git ls-files | xargs grep -nE '(TODO|FIXME|XXX)' 2>/dev/null \
+                | while IFS=: read -r file line content; do
+                    last_modified=$(git log -1 --format=%ct -- "$file" 2>/dev/null || echo 0)
+                    if [ "$last_modified" -gt 0 ]; then
+                      age_days=$(( ( $(date +%s) - last_modified ) / 86400 ))
+                      if [ "$age_days" -gt 90 ]; then
+                        echo "$file:$line  (${age_days}d old) $content"
+                      fi
+                    fi
+                  done > stale-todos.txt || true
+              wc -l stale-todos.txt
+
+              echo "## Stale draft specs (>30 days)"
+              if [ -d specs ]; then
+                find specs -path 'specs/draft-*/spec.md' -mtime +30 -print > stale-drafts.txt || true
+                wc -l stale-drafts.txt
+              fi
+            displayName: Find stale TODOs and drafts
+
+          - publish: stale-todos.txt
+            artifact: stale-todos
+            condition: always()
+
+          - publish: stale-drafts.txt
+            artifact: stale-drafts
+            condition: always()

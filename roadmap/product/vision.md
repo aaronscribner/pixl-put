@@ -45,7 +45,7 @@ Title-only is never the primary strategy. Adding support for a new app means
 adding a new identity provider, not weakening the existing layers.
 
 This is the entire reason the product exists. See
-[`.specify/memory/constitution.md`](../../.specify/memory/constitution.md) §II.
+[`constitution.md`](./constitution.md) §II.
 
 ## What success looks like
 

@@ -1,0 +1,28 @@
+agent: documentation
+version: 1
+
+self_report:
+  - id: changelog-entry
+    description: An Unreleased CHANGELOG entry was appended (or `NO-OP` documented if no public surface changed)
+    type: bool
+  - id: only-affected-sections
+    description: README edits touched only sections whose content the diff actually changed (no prose rewrites)
+    type: bool
+  - id: links-resolve
+    description: All internal markdown links in the updated docs resolve
+    type: bool
+  - id: adr-when-architecture-changed
+    description: If diff includes architectural change, a new ADR was created under <adr_root>
+    type: bool
+
+ground_truth:
+  - id: docs-not-reverted
+    description: A subsequent commit did not revert these doc changes within 14 days
+    source: git-log
+    compute: |
+      look for `git revert <docs-commit>` or `docs:` commits that undo this agent's changes within 14d.
+  - id: no-stale-claim
+    description: No claim in the updated docs was contradicted by a follow-up commit within 30 days
+    source: git-log
+    compute: |
+      heuristic — for changed README sections, find `fix:`/`docs:` commits within 30d touching the same section.

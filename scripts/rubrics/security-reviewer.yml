@@ -1,0 +1,33 @@
+agent: security-reviewer
+version: 1
+
+self_report:
+  - id: all-five-passes-run
+    description: Secrets, OWASP, dependency CVE, IaC, and permission-pattern passes all executed
+    type: bool
+  - id: scanners-listed
+    description: Every scanner invoked or skipped (with reason) is listed in the verdict block
+    type: bool
+  - id: every-finding-actionable
+    description: Every critical finding cites file:line and proposes a specific fix
+    type: bool
+  - id: deps-fixed-version-cited
+    description: Every CVE finding includes the fixed-version target
+    type: bool
+
+ground_truth:
+  - id: no-cve-merged
+    description: No critical-severity CVE survived into merged main
+    source: gh-pr + dependency-scan
+    compute: |
+      diff dependency lockfile at merge commit vs prior; FAIL if any added dep has severity >= high at audit time.
+  - id: no-secret-leaked
+    description: No secret-pattern match in the merged diff went unflagged
+    source: git-log
+    compute: |
+      re-run secrets grep on merged commit; FAIL if any match the reviewer didn't flag.
+  - id: no-post-merge-security-incident
+    description: No security incident references this feature within 90 days
+    source: incident-log
+    compute: |
+      grep security-tagged incidents for this feature's spec path or PR number within 90d.

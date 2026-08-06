@@ -1,0 +1,75 @@
+# Claude Code: failed-build triage pipeline
+#
+# Manual trigger pipeline. Pass the failed run ID as a parameter; the
+# devops agent triages the failure and writes a triage note. Does NOT
+# auto-apply fixes — outputs a suggested diff in the triage note that a
+# human (or follow-up agent session) decides whether to apply.
+
+trigger: none
+pr: none
+
+parameters:
+  - name: failedRunId
+    displayName: Failed pipeline run ID (Azure Pipelines)
+    type: string
+    default: ''
+  - name: failedRunUrl
+    displayName: 'OR: failed run URL (GitHub Actions)'
+    type: string
+    default: ''
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: claude-code-secrets
+  - name: nodeVersion
+    value: '20.x'
+
+stages:
+  - stage: Triage
+    displayName: Claude CI failure triage
+    jobs:
+      - job: Triage
+        displayName: /fix-ci-failure
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+            displayName: Install Node.js
+
+          - script: |
+              npm install -g @anthropic-ai/claude-code
+            displayName: Install Claude Code CLI
+
+          - script: |
+              set -euo pipefail
+              if [ -n "${{ parameters.failedRunId }}" ]; then
+                TARGET="${{ parameters.failedRunId }}"
+              elif [ -n "${{ parameters.failedRunUrl }}" ]; then
+                TARGET="${{ parameters.failedRunUrl }}"
+              else
+                echo "##vso[task.logissue type=error]Provide failedRunId or failedRunUrl."
+                exit 1
+              fi
+              claude --print "/fix-ci-failure $TARGET" \
+                --output-format stream-json \
+                > triage.jsonl
+            displayName: Run /fix-ci-failure
+            env:
+              ANTHROPIC_API_KEY: $(CLAUDE_API_KEY)
+              AZURE_DEVOPS_EXT_PAT: $(AZURE_DEVOPS_PAT)
+
+          - publish: triage.jsonl
+            artifact: triage-log
+            displayName: Publish triage log
+
+          - script: |
+              # Surface any devops-triage.md files written during this run
+              find specs -name 'devops-triage.md' -newer /tmp/.start 2>/dev/null \
+                || find . -path './devops-triage/*.md' -newer /tmp/.start 2>/dev/null \
+                || true
+            displayName: List triage notes

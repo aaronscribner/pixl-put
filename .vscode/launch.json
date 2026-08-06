@@ -1,0 +1,44 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:PixPut}",
+            "name": "Debug PixPut",
+            "target": "PixPut",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug PixPut"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:PixPut}",
+            "name": "Release PixPut",
+            "target": "PixPut",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release PixPut"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:PixPut}",
+            "name": "Debug PixlPut",
+            "target": "PixlPut",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug PixlPut"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:PixPut}",
+            "name": "Release PixlPut",
+            "target": "PixlPut",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release PixlPut"
+        }
+    ]
+}

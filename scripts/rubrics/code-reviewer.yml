@@ -1,0 +1,28 @@
+agent: code-reviewer
+version: 1
+
+self_report:
+  - id: five-passes-completed
+    description: All five review passes (correctness, security, design, quality, tests+performance) were executed
+    type: bool
+  - id: every-comment-actionable
+    description: Every critical/suggestion comment cites a file:line and includes a proposed fix
+    type: bool
+  - id: pattern-adherence-checked
+    description: Pattern Adherence verdict block was appended at tasks/analysis phase
+    type: bool
+  - id: no-rubber-stamp
+    description: Review surfaced at least one positive observation AND at least one suggestion/nit (avoids both lazy approves and lazy rejects)
+    type: bool
+
+ground_truth:
+  - id: review-verdict-held
+    description: Human reviewer did not later overturn the verdict (no APPROVE → CHANGES_REQUESTED flip and no merge of REQUEST_CHANGES PR)
+    source: gh-pr
+    compute: |
+      gh pr view --json reviews + mergedAt; FAIL if (a) state flipped after agent review or (b) PR was merged despite CHANGES_REQUESTED.
+  - id: no-missed-defect
+    description: No defect surfaces post-merge in the file paths the reviewer signed off on
+    source: incident-log + git-log
+    compute: |
+      for each file approved, search for follow-up `fix:` commits or incidents within 30d; FAIL if any.

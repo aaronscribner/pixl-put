@@ -1,0 +1,29 @@
+agent: tdd-developer
+version: 1
+
+self_report:
+  - id: tests-only
+    description: Only test files were modified in this RED commit (no production code touched)
+    type: bool
+  - id: tests-fail-locally
+    description: Every new/modified test was confirmed failing locally before commit
+    type: bool
+  - id: every-criterion-covered
+    description: Each acceptance criterion in spec.md is covered by at least one test
+    type: bool
+  - id: red-commit-message
+    description: Commit message follows `test(red): <description>` format
+    type: bool
+
+ground_truth:
+  - id: green-commit-followed
+    description: A `feat(green):` commit was made within 24h of the RED commit
+    source: git-log
+    compute: |
+      find RED commit timestamp; mark FAIL if no matching GREEN commit on this branch within 24h.
+  - id: tests-still-pass-at-pr
+    description: All tests from this RED commit still pass at PR open
+    source: ci-log
+    compute: |
+      cross-reference test names in RED commit with test results in latest CI run on branch;
+      FAIL if any test was deleted or now skipped.

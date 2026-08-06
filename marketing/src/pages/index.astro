@@ -1,0 +1,216 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const structuredData = {
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareApplication',
+    name: 'PixPut',
+    applicationCategory: 'UtilityApplication',
+    operatingSystem: 'macOS 14+',
+    offers: {
+        '@type': 'Offer',
+        price: '19',
+        priceCurrency: 'USD',
+        availability: 'https://schema.org/InStock',
+    },
+    description: 'PixPut remembers where every window was — and puts each one back. Survives sleep, wake, and display changes on macOS.',
+    softwareVersion: '0.1',
+};
+---
+<BaseLayout
+    title="PixPut — Window memory for macOS"
+    description="PixPut remembers where every window was — and puts each one back. Survives sleep, wake, and display reconfiguration. No off-device data."
+    path="/"
+    structuredData={structuredData}
+>
+    <section class="hero container">
+        <h1>Your windows. Where you left them.</h1>
+        <p class="lede">
+            Sleep, wake, plug in a monitor, unplug, switch Spaces — macOS scatters your carefully-arranged windows.
+            PixPut quietly remembers every position and puts each one back. No clicks. No re-arranging. No data leaves your Mac.
+        </p>
+        <div class="cta-row">
+            <a href="/buy" class="btn btn-primary">Get PixPut · $19 one-time</a>
+            <a href="#features" class="btn btn-secondary">See features</a>
+        </div>
+        <p class="micro">14-day trial · No account · Works offline · Apple-signed and notarized</p>
+    </section>
+
+    <section id="features" class="features container">
+        <h2>What PixPut does</h2>
+        <div class="grid">
+            <article>
+                <h3>Survives sleep &amp; wake</h3>
+                <p>macOS herds your windows onto the laptop screen during sleep. PixPut snaps them back the moment you wake.</p>
+            </article>
+            <article>
+                <h3>Per-Space layouts</h3>
+                <p>Every Mission Control Space gets its own remembered arrangement. Visit a Space and it auto-captures.</p>
+            </article>
+            <article>
+                <h3>Multi-monitor aware</h3>
+                <p>Tracks each display by hardware fingerprint, so docking and undocking restores the right layout — every time.</p>
+            </article>
+            <article>
+                <h3>Local-only by design</h3>
+                <p>Snapshots live in your Library. No telemetry, no analytics, no cloud sync. The only network call is license validation.</p>
+            </article>
+            <article>
+                <h3>Cross-Space capture</h3>
+                <p>Every time you switch Spaces, the previous one's layout is captured silently. After one normal workday, every Space is covered.</p>
+            </article>
+            <article>
+                <h3>Identity-aware restore</h3>
+                <p>Optional per-app deep identity (off by default) means Brave tabs and VSCode workspaces always go back to the right window.</p>
+            </article>
+        </div>
+    </section>
+
+    <section id="how" class="how container">
+        <h2>How it works</h2>
+        <ol>
+            <li><strong>Capture.</strong> PixPut snapshots every window's position, size, and which Space &amp; display it's on.</li>
+            <li><strong>Watch.</strong> Sleep, wake, dock, undock, lock — any event that scatters your windows, PixPut sees.</li>
+            <li><strong>Restore.</strong> Windows snap back to their last-known positions in milliseconds.</li>
+        </ol>
+        <p class="aside">Built around Apple's Accessibility API. Code-signed with Developer ID and notarized — Gatekeeper-clean out of the gate.</p>
+    </section>
+
+    <section id="pricing" class="pricing container">
+        <h2>One price. No subscription.</h2>
+        <div class="plan">
+            <div class="price">$19</div>
+            <div class="meta">One-time · 3 devices · Free updates for 1 year</div>
+            <ul>
+                <li>Capture &amp; restore on sleep, wake, lock, display change</li>
+                <li>Per-Space and multi-monitor support</li>
+                <li>14-day full-featured trial</li>
+                <li>Apple Developer-ID signed &amp; notarized</li>
+                <li>Email support, refund within 30 days</li>
+            </ul>
+            <a href="/buy" class="btn btn-primary">Get PixPut</a>
+        </div>
+    </section>
+</BaseLayout>
+
+<style>
+    .hero {
+        padding: 96px 0 64px;
+        text-align: center;
+    }
+    .hero h1 {
+        font-size: clamp(40px, 6vw, 64px);
+        line-height: 1.05;
+        letter-spacing: -0.025em;
+        font-weight: 700;
+        margin-bottom: 24px;
+    }
+    .hero .lede {
+        font-size: 19px;
+        line-height: 1.55;
+        color: var(--text-dim);
+        max-width: 720px;
+        margin: 0 auto 32px;
+    }
+    .cta-row {
+        display: flex;
+        gap: 12px;
+        justify-content: center;
+        flex-wrap: wrap;
+        margin-bottom: 16px;
+    }
+    .micro {
+        font-size: 13px;
+        color: var(--text-dim);
+    }
+
+    .features {
+        padding: 80px 0;
+    }
+    .features h2, .how h2, .pricing h2 {
+        font-size: 32px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        margin-bottom: 32px;
+    }
+    .features .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+        gap: 20px;
+    }
+    .features article {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 24px;
+    }
+    .features h3 {
+        font-size: 17px;
+        margin-bottom: 8px;
+        font-weight: 600;
+    }
+    .features p {
+        color: var(--text-dim);
+        font-size: 15px;
+        line-height: 1.5;
+    }
+
+    .how {
+        padding: 64px 0;
+    }
+    .how ol {
+        padding-left: 24px;
+        max-width: 720px;
+    }
+    .how li {
+        margin-bottom: 16px;
+        color: var(--text-dim);
+        font-size: 16px;
+        line-height: 1.55;
+    }
+    .how li strong { color: var(--text); }
+    .how .aside {
+        margin-top: 32px;
+        padding: 16px 20px;
+        background: var(--surface);
+        border-left: 3px solid var(--accent);
+        border-radius: 6px;
+        color: var(--text-dim);
+        font-size: 14px;
+    }
+
+    .pricing {
+        padding: 80px 0;
+    }
+    .plan {
+        max-width: 480px;
+        margin: 0 auto;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 32px;
+        text-align: center;
+    }
+    .plan .price {
+        font-size: 56px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+    }
+    .plan .meta {
+        color: var(--text-dim);
+        margin-bottom: 24px;
+    }
+    .plan ul {
+        list-style: none;
+        text-align: left;
+        margin: 0 0 28px;
+        padding: 0;
+    }
+    .plan li {
+        padding: 8px 0;
+        color: var(--text-dim);
+        border-bottom: 1px solid var(--border);
+        font-size: 14px;
+    }
+    .plan li:last-child { border-bottom: none; }
+</style>

@@ -1,0 +1,73 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+<BaseLayout
+    title="Privacy — PixPut"
+    description="What PixPut does and does not collect. Short answer: nothing leaves your machine except license validation."
+    path="/privacy"
+>
+    <section class="prose container">
+        <h1>Privacy</h1>
+        <p><strong>Short answer:</strong> nothing about your windows, files, or activity ever leaves your Mac. The only network call PixPut ever makes is license validation to <code>api.pixput.app</code>.</p>
+
+        <h2>What's stored locally</h2>
+        <ul>
+            <li><strong>Snapshots</strong> — window positions, sizes, app bundle IDs, and (optionally) document URLs you opened. Lives in <code>~/Library/Application Support/PixPut/snapshots/</code>. Never transmitted.</li>
+            <li><strong>License + machine ID</strong> — your activation status, stored in Keychain. Machine ID is a one-way hash of your hardware UUID, useless outside our license database.</li>
+            <li><strong>Diagnostic log</strong> — a plain-text trace of capture/restore decisions, in <code>~/Library/Application Support/PixPut/logs/</code>. Replaced each launch. Never auto-sent.</li>
+        </ul>
+
+        <h2>What's sent over the network</h2>
+        <ul>
+            <li><strong>License activation/validation</strong> — your license key, hashed machine ID, app version, and a random nonce. The server replies with a cryptographically signed status. That's the entire payload.</li>
+            <li><strong>Software updates</strong> — Sparkle checks our appcast for new versions. No identifying data sent beyond a User-Agent.</li>
+        </ul>
+        <p>No analytics. No crash reporting. No cookies. No third-party SDKs of any kind.</p>
+
+        <h2>Payment</h2>
+        <p>Purchases are handled by Lemon Squeezy as merchant of record. We see only your email and order ID (used to issue your license). Their privacy policy: <a href="https://www.lemonsqueezy.com/privacy">lemonsqueezy.com/privacy</a>.</p>
+
+        <h2>Data deletion</h2>
+        <p>Delete the snapshots folder above to remove all local data. Click "Deactivate" in PixPut → License… to release your activation slot and wipe your local license. Email <a href="mailto:support@pixput.app">support@pixput.app</a> if you want your license record fully purged from our database.</p>
+
+        <p class="updated">Last updated: 2026-05-30</p>
+    </section>
+</BaseLayout>
+
+<style>
+    .prose {
+        padding: 64px 0;
+        max-width: 720px;
+        margin: 0 auto;
+    }
+    .prose h1 {
+        font-size: 36px;
+        font-weight: 700;
+        margin-bottom: 24px;
+        letter-spacing: -0.02em;
+    }
+    .prose h2 {
+        font-size: 22px;
+        font-weight: 600;
+        margin: 32px 0 12px;
+    }
+    .prose p, .prose li {
+        font-size: 15px;
+        line-height: 1.65;
+        color: var(--text-dim);
+    }
+    .prose p { margin-bottom: 14px; }
+    .prose ul { padding-left: 24px; margin-bottom: 20px; }
+    .prose strong { color: var(--text); }
+    .prose code {
+        background: var(--surface);
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 13px;
+    }
+    .updated {
+        margin-top: 48px;
+        font-size: 13px;
+        color: var(--text-dim);
+    }
+</style>

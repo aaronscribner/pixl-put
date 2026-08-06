@@ -1,0 +1,31 @@
+agent: qa
+version: 1
+
+self_report:
+  - id: tdd-cycle-audited
+    description: Git history was audited for RED → GREEN → REFACTOR ordering and completeness
+    type: bool
+  - id: full-suite-run
+    description: Full test suite ran locally and passed (not just affected tests)
+    type: bool
+  - id: linters-clean
+    description: Linter and type-checker passed with zero errors
+    type: bool
+  - id: build-clean
+    description: Build completed with no errors or treat-as-error warnings
+    type: bool
+  - id: every-criterion-covered
+    description: Each acceptance criterion in spec.md has at least one passing test
+    type: bool
+
+ground_truth:
+  - id: ci-passed-on-pr
+    description: CI was green on the PR at open time (not after fixes)
+    source: gh-pr
+    compute: |
+      gh pr checks <pr> at PR-open commit SHA; FAIL if any required check is failure/cancelled.
+  - id: no-post-merge-incident
+    description: No incident report links back to this feature within 14 days of merge
+    source: incident-log + git-log
+    compute: |
+      grep roadmap/product/draft-*/spec.md for references to this feature's spec path within 14d of merge; FAIL if any.

@@ -1,0 +1,30 @@
+agent: architect
+version: 1
+
+self_report:
+  - id: precepts-loaded
+    description: All five CJCO precept inputs read before producing the verdict
+    type: bool
+  - id: c4-cited
+    description: Verdict references at least one C4 element (context, container, component)
+    type: bool
+  - id: verdict-block-emitted
+    description: Architect Verdict block appended to the artefact (spec/plan/tasks/checklists/analysis)
+    type: bool
+  - id: no-source-edits
+    description: Agent did not modify source code, tests, or spec/plan body content (read-only outside its verdict block)
+    type: bool
+
+ground_truth:
+  - id: verdict-held
+    description: Verdict was not later reversed by code-reviewer or human in this feature's PR
+    source: gh-pr + git-log
+    compute: |
+      for the feature's PR, look for "reverse architect verdict" / "override" patterns
+      in PR comments or follow-up commit messages; mark FAIL if found.
+  - id: spec-survived-to-pr
+    description: The spec.md the architect signed off was not substantially rewritten before PR open
+    source: git-log
+    compute: |
+      diff specs/<f>/spec.md at architect-verdict commit vs at PR-open commit;
+      mark FAIL if >30% of lines changed.

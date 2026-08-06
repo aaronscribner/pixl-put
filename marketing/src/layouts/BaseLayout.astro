@@ -1,0 +1,178 @@
+---
+// Base HTML layout — owns <head>, OG/Twitter meta, schema.org JSON-LD.
+// All pages should use this and only customize the `title` / `description`
+// / `path` props, so canonical URLs and OG tags stay consistent.
+
+interface Props {
+    title: string;
+    description: string;
+    path: string;          // e.g. "/", "/buy", "/changelog"
+    ogImage?: string;      // relative or absolute
+    pageType?: 'website' | 'article' | 'product';
+    structuredData?: object;
+}
+
+const {
+    title,
+    description,
+    path,
+    ogImage = '/og.png',
+    pageType = 'website',
+    structuredData,
+} = Astro.props;
+
+const canonical = new URL(path, Astro.site).toString();
+const ogImageAbs = new URL(ogImage, Astro.site).toString();
+---
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content={pageType} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={ogImageAbs} />
+    <meta property="og:site_name" content="PixPut" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImageAbs} />
+
+    <!-- Theme + favicon -->
+    <meta name="theme-color" content="#0f172a" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+
+    <!-- Preload critical fonts -->
+    <link rel="preconnect" href="https://rsms.me" crossorigin />
+    <link rel="stylesheet" href="https://rsms.me/inter/inter.css" />
+
+    {structuredData && (
+        <script type="application/ld+json" set:html={JSON.stringify(structuredData)} />
+    )}
+
+    <style is:global>
+        :root {
+            --bg: #0a0a0f;
+            --surface: #11131c;
+            --surface-2: #1a1d2a;
+            --text: #f5f6fa;
+            --text-dim: #9ba3b4;
+            --accent: #6c8cff;
+            --accent-hover: #8aa3ff;
+            --border: #232739;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            font-feature-settings: 'cv11', 'ss01', 'ss03';
+            color-scheme: dark;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { background: var(--bg); color: var(--text); min-height: 100%; -webkit-font-smoothing: antialiased; }
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { color: var(--accent-hover); }
+        img { max-width: 100%; height: auto; display: block; }
+
+        .container {
+            max-width: 1120px;
+            margin: 0 auto;
+            padding: 0 24px;
+        }
+
+        nav.site {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        nav.site a.brand {
+            color: var(--text);
+            font-weight: 700;
+            font-size: 18px;
+            letter-spacing: -0.01em;
+        }
+        nav.site ul {
+            display: flex;
+            gap: 24px;
+            list-style: none;
+            font-size: 14px;
+        }
+        nav.site ul a { color: var(--text-dim); }
+        nav.site ul a:hover { color: var(--text); }
+
+        footer.site {
+            margin-top: 96px;
+            padding: 32px 0;
+            border-top: 1px solid var(--border);
+            color: var(--text-dim);
+            font-size: 13px;
+        }
+        footer.site .row {
+            display: flex;
+            justify-content: space-between;
+            gap: 24px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 22px;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 15px;
+            transition: transform 60ms ease, background 120ms ease;
+            cursor: pointer;
+            border: 1px solid transparent;
+        }
+        .btn-primary {
+            background: var(--accent);
+            color: #0a0a0f;
+        }
+        .btn-primary:hover { background: var(--accent-hover); color: #0a0a0f; transform: translateY(-1px); }
+        .btn-secondary {
+            background: transparent;
+            color: var(--text);
+            border-color: var(--border);
+        }
+        .btn-secondary:hover { background: var(--surface-2); }
+    </style>
+</head>
+<body>
+    <header class="container">
+        <nav class="site">
+            <a href="/" class="brand">PixPut</a>
+            <ul>
+                <li><a href="/#features">Features</a></li>
+                <li><a href="/#how">How it works</a></li>
+                <li><a href="/#pricing">Pricing</a></li>
+                <li><a href="/buy" class="btn-buy">Buy</a></li>
+            </ul>
+        </nav>
+    </header>
+
+    <main>
+        <slot />
+    </main>
+
+    <footer class="site container">
+        <div class="row">
+            <div>
+                © {new Date().getFullYear()} Cerebral Juice Co. PixPut is a macOS utility.
+            </div>
+            <div>
+                <a href="/privacy">Privacy</a> · <a href="/changelog">Changelog</a> · <a href="https://github.com/cerebraljuice/pixput">GitHub</a>
+            </div>
+        </div>
+    </footer>
+</body>
+</html>

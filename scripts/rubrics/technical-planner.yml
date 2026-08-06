@@ -1,0 +1,29 @@
+agent: technical-planner
+version: 1
+
+self_report:
+  - id: spec-verdict-clean
+    description: spec.md had a non-BLOCKING architect verdict before plan started
+    type: bool
+  - id: artefacts-produced
+    description: All required artefacts produced (plan.md, data-model.md, contracts/, tasks.md, quickstart.md)
+    type: bool
+  - id: tasks-parallel-tagged
+    description: tasks.md uses [P] markers correctly for non-overlapping file scopes
+    type: bool
+  - id: no-architecture-judgement
+    description: Plan does NOT contain new architecture decisions (those belong to architect)
+    type: bool
+
+ground_truth:
+  - id: tasks-completed-as-written
+    description: Every task in tasks.md was completed without mid-flight restructuring
+    source: git-log
+    compute: |
+      count tasks in tasks.md at plan time; count tasks marked [x] at PR time;
+      mark FAIL if tasks were added/removed/reordered after plan was signed off.
+  - id: plan-survived-to-pr
+    description: plan.md was not substantially rewritten during implementation
+    source: git-log
+    compute: |
+      diff plan.md at planner-completion commit vs at PR-open commit; FAIL if >20% line churn.

@@ -1,0 +1,50 @@
+# SwiftLint configuration for PixPut.
+# Run: `swiftlint --strict` (CI uses --strict).
+# Install:  brew install swiftlint
+
+excluded:
+  - .build
+  - build
+  - Tests/Fixtures
+
+# Disable rules that fight project-specific patterns documented in
+# the constitution and the C4 components.
+disabled_rules:
+  - todo                       # We use TODO comments intentionally — every one is paired with a v1.1 task ID
+  - line_length                # Long doc comments in agent-facing files are normal
+  - trailing_comma             # Multiline literals look better with trailing commas
+  - identifier_name            # We use short variable names in tight closures (`a`, `b` for rect math, `id` for fingerprint)
+
+# Opt-in rules that catch real issues PixPut cares about.
+opt_in_rules:
+  - empty_count
+  - empty_string
+  - explicit_init
+  - first_where
+  - last_where
+  - sorted_imports
+  - unowned_variable_capture
+  - weak_delegate
+
+# Tunings:
+function_body_length:
+  warning: 80    # AX-bound + restore methods get chatty; 80 lines is generous but bounded
+  error: 150
+
+type_body_length:
+  warning: 400
+  error: 600
+
+file_length:
+  warning: 600
+  error: 1000
+
+cyclomatic_complexity:
+  warning: 12
+  error: 20
+
+nesting:
+  type_level:
+    warning: 2
+  function_level:
+    warning: 4   # Test fixtures have nested closures

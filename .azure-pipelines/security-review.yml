@@ -1,0 +1,62 @@
+# Claude Code: security review pipeline
+#
+# Invokes the security-reviewer agent on PR open / update. Reports
+# critical findings as PR comments and fails the build on BLOCKING
+# verdicts.
+
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: claude-code-secrets
+  - name: nodeVersion
+    value: '20.x'
+
+stages:
+  - stage: SecurityReview
+    displayName: Claude security review
+    jobs:
+      - job: SecurityReview
+        displayName: /security-review
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+            displayName: Install Node.js
+
+          - script: |
+              npm install -g @anthropic-ai/claude-code
+            displayName: Install Claude Code CLI
+
+          - script: |
+              set -euo pipefail
+              PR_ID="$(System.PullRequest.PullRequestId)"
+              claude --print "/security-review $PR_ID" \
+                --output-format stream-json \
+                > security-review.jsonl
+
+              # Fail the build if the verdict is BLOCKING. The agent
+              # appends to specs/<f>/analysis.md; if the most recent
+              # Security Verdict in any analysis.md is BLOCKING, exit 1.
+              if grep -lE '^\*\*Verdict\*\*: BLOCKING' specs/*/analysis.md 2>/dev/null; then
+                echo "##vso[task.logissue type=error]security-reviewer returned BLOCKING. See PR comments."
+                exit 1
+              fi
+            displayName: Run /security-review
+            env:
+              ANTHROPIC_API_KEY: $(CLAUDE_API_KEY)
+
+          - publish: security-review.jsonl
+            artifact: security-review-log
+            displayName: Publish security review log

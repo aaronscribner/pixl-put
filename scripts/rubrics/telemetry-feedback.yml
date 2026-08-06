@@ -1,0 +1,29 @@
+agent: telemetry-feedback
+version: 1
+
+self_report:
+  - id: raw-signal-verbatim
+    description: The raw stack trace / log excerpt was included in the draft verbatim (not paraphrased)
+    type: bool
+  - id: hypothesis-labelled
+    description: Hypothesis is explicitly labelled as such (not asserted as root cause)
+    type: bool
+  - id: clarifications-marked
+    description: Every unknown is marked `[NEEDS CLARIFICATION]`
+    type: bool
+  - id: duplicate-check-done
+    description: Existing specs and prior drafts were searched for similar signals before creating a new draft
+    type: bool
+
+ground_truth:
+  - id: draft-promoted
+    description: Draft was promoted to a real spec within 14 days (humans found it useful)
+    source: git-log
+    compute: |
+      check whether roadmap/product/draft-<slug> was moved to roadmap/product/<NNN>-<slug> within 14 days of creation.
+  - id: hypothesis-confirmed
+    description: When the spec was implemented, the hypothesis matched the actual root cause
+    source: git-log + pr-history
+    compute: |
+      compare draft's hypothesis section against the implementing PR's commit messages / spec.md;
+      manual check (qualitative, evaluator must read both).

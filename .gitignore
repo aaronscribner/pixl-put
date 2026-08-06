@@ -8,3 +8,6 @@
 build/
 node_modules/
 *.app
+
+# Finder cruft
+.DS_Store

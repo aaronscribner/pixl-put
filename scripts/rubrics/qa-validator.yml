@@ -1,0 +1,20 @@
+agent: qa-validator
+version: 1
+
+self_report:
+  - id: spec-cross-referenced
+    description: Every acceptance criterion was matched to at least one RED test
+    type: bool
+  - id: failure-reasons-checked
+    description: Each test was confirmed to fail for the *right reason* (not compile error, not setup failure)
+    type: bool
+  - id: gaps-listed
+    description: Any spec criterion without a test was explicitly listed in the validator's report
+    type: bool
+
+ground_truth:
+  - id: no-spec-gap-found-in-pr
+    description: Code reviewer did not surface a missing acceptance-criterion test at PR review
+    source: gh-pr
+    compute: |
+      scan code-reviewer's PR review for "missing test", "untested", "no coverage for"; FAIL if any.

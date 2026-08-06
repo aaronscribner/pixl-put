@@ -1,0 +1,81 @@
+# Claude Code: weekly rubric / coaching report
+#
+# Scheduled Monday run that invokes the rubric-evaluator agent. Produces
+# roadmap/agent-coaching/<YYYY-WW>.md and publishes it as a pipeline
+# artifact for easy team review. Does NOT commit the report — the
+# repository keeps coaching reports under version control via a manual
+# follow-up (or via a separate auto-commit pipeline if your team wants
+# that, but it's intentionally not in this template).
+
+trigger: none
+pr: none
+
+schedules:
+  - cron: '0 7 * * 1'    # Mondays at 07:00 UTC (one hour after weekly-cleanup)
+    displayName: Weekly rubric / coaching
+    branches:
+      include:
+        - main
+    always: true
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: claude-code-secrets
+  - name: nodeVersion
+    value: '20.x'
+
+stages:
+  - stage: RubricReport
+    displayName: Factory rubric & coaching
+    jobs:
+      - job: RubricReport
+        displayName: /factory-report
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(nodeVersion)
+            displayName: Install Node.js
+
+          - script: |
+              npm install -g @anthropic-ai/claude-code
+            displayName: Install Claude Code CLI
+
+          - script: |
+              # Validate the rubric substrate before invoking the agent.
+              node scripts/rubric.mjs validate
+            displayName: Validate rubric YAMLs
+
+          - script: |
+              # Deterministic stats first — these are captured as artifacts
+              # whether or not the agent run succeeds.
+              mkdir -p out
+              node scripts/rubric.mjs aggregate --since 7d > out/rubric-aggregate.json
+              node scripts/rubric.mjs by-agent --since 7d > out/rubric-by-agent.json
+            displayName: Aggregate run.jsonl (deterministic)
+
+          - script: |
+              set -euo pipefail
+              claude --print "/factory-report --since 7d" \
+                --output-format stream-json \
+                > out/factory-report.jsonl
+            displayName: Run /factory-report
+            env:
+              ANTHROPIC_API_KEY: $(CLAUDE_API_KEY)
+              AZURE_DEVOPS_EXT_PAT: $(AZURE_DEVOPS_PAT)
+
+          - publish: out
+            artifact: rubric-report
+            displayName: Publish rubric outputs
+
+          - script: |
+              # Surface the coaching report path for the pipeline summary.
+              find roadmap/agent-coaching -name '*.md' -newer /tmp/.start 2>/dev/null \
+                || ls -la roadmap/agent-coaching/ 2>/dev/null \
+                || echo "No coaching report directory yet."
+            displayName: List coaching reports
+            condition: always()

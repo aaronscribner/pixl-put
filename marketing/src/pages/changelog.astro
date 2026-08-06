@@ -1,0 +1,27 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+---
+<BaseLayout
+    title="Changelog — PixPut"
+    description="Release notes for PixPut."
+    path="/changelog"
+>
+    <section class="prose container">
+        <h1>Changelog</h1>
+
+        <article>
+            <h2>0.1 — in development</h2>
+            <ul>
+                <li>Initial release.</li>
+            </ul>
+        </article>
+    </section>
+</BaseLayout>
+
+<style>
+    .prose { padding: 64px 0; max-width: 720px; margin: 0 auto; }
+    .prose h1 { font-size: 36px; font-weight: 700; margin-bottom: 24px; }
+    .prose article { margin-bottom: 32px; }
+    .prose h2 { font-size: 20px; font-weight: 600; margin-bottom: 12px; }
+    .prose ul { padding-left: 24px; color: var(--text-dim); line-height: 1.65; }
+</style>

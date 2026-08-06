@@ -1,0 +1,66 @@
+# PixPut — build + test pipeline.
+# Runs on every push and PR. Apple-Silicon agent required (Swift 5.10+,
+# Xcode 15.4+). Signed release builds happen on a separate, secret-bearing
+# pipeline (see release.yml — not yet implemented; tracked as next-session work).
+
+trigger:
+  branches:
+    include:
+      - master
+      - main
+      - feature/*
+      - story/*
+
+pr:
+  branches:
+    include:
+      - master
+      - main
+
+pool:
+  vmImage: 'macOS-latest'
+
+variables:
+  XCODE_VERSION_MAJOR: '15'
+
+steps:
+  - script: |
+      sudo xcode-select -s "/Applications/Xcode_${XCODE_VERSION_MAJOR}.app/Contents/Developer" || true
+      xcode-select -p
+      swift --version
+    displayName: 'Show toolchain versions'
+
+  - script: |
+      set -euo pipefail
+      swift build -c debug 2>&1 | tee build-debug.log
+    displayName: 'swift build (debug)'
+
+  - script: |
+      set -euo pipefail
+      swift test --parallel 2>&1 | tee test.log
+    displayName: 'swift test'
+
+  - script: |
+      set -euo pipefail
+      if ! command -v swiftlint >/dev/null 2>&1; then
+        brew install swiftlint
+      fi
+      swiftlint --strict --quiet
+    displayName: 'swiftlint --strict'
+
+  - script: |
+      set -euo pipefail
+      ./scripts/build-app.sh release
+    displayName: 'Assemble PixPut.app (release, unsigned)'
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish unsigned PixPut.app'
+    inputs:
+      pathToPublish: 'build/PixPut.app'
+      artifactName: 'PixPut-unsigned'
+      publishLocation: 'Container'
+
+  - script: |
+      set -euo pipefail
+      node scripts/rubric.mjs validate
+    displayName: 'Rubric substrate sanity check'

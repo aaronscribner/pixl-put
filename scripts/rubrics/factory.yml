@@ -1,0 +1,64 @@
+agent: __factory__
+version: 1
+
+# Factory-level rubric — computed by rubric-evaluator across all specs in
+# the window. Not self-reported (no agent owns the factory as a whole).
+
+ground_truth:
+  - id: cycle-time-p50
+    description: Median wall-clock from first commit on feature branch to PR merge
+    source: git-log + gh-pr
+    compute: |
+      for each merged feature PR in the window, compute (mergedAt - first commit ts on branch);
+      report p50, p90.
+    target: p50 < 5 days
+
+  - id: gate-pass-rate
+    description: Fraction of features that hit every phase gate clean on the first try
+    source: run-jsonl
+    compute: |
+      count features where no agent emitted verdict in {BLOCKING, REJECTED} across the run;
+      divide by total features.
+    target: > 0.75
+
+  - id: retry-rate
+    description: Average number of retries per feature (count of duplicate agent invocations on the same phase)
+    source: run-jsonl
+    compute: |
+      group run.jsonl by (feature, agent, phase); count > 1 events per group; average across features.
+    target: < 0.5 per feature
+
+  - id: reviewer-reversal-rate
+    description: Fraction of code-reviewer APPROVE verdicts later reversed by humans
+    source: gh-pr
+    compute: |
+      count code-reviewer APPROVEs in window; count where human review later requested changes; divide.
+    target: < 0.10
+
+  - id: security-block-rate
+    description: Fraction of features where security-reviewer's first pass was BLOCKING
+    source: run-jsonl
+    compute: |
+      count features where security-reviewer first verdict == BLOCKING; divide by total features.
+    target: < 0.20  # higher means devs are skipping security thinking
+
+  - id: post-merge-incident-rate
+    description: Fraction of merged features that show up in an incident within 30 days
+    source: incident-log + git-log
+    compute: |
+      for each merged feature, check whether roadmap/product/draft-* or incident files reference it within 30d.
+    target: < 0.05
+
+  - id: docs-coverage
+    description: Fraction of merged features that produced at least one CHANGELOG entry
+    source: git-log
+    compute: |
+      grep CHANGELOG.md unreleased section at each merge commit; FAIL features with no entry.
+    target: > 0.95
+
+  - id: telemetry-loop-active
+    description: Number of draft specs from telemetry-feedback that were promoted to real specs in the window
+    source: git-log
+    compute: |
+      count roadmap/product/<NNN>-* directories whose first commit was a `git mv` from roadmap/product/draft-*.
+    target: > 0  # at least one promotion per quarter signals the loop is alive

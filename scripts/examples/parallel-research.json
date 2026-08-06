@@ -1,0 +1,22 @@
+{
+  "description": "Parallel research agents — Market + UX run simultaneously",
+  "tasks": [
+    {
+      "id": "research-market",
+      "type": "research",
+      "description": "Market research: competitive landscape, trends, standards",
+      "agent": "agents/product/market-researcher.md",
+      "files": ["specs/NNN-feature/research.md"],
+      "dependencies": []
+    },
+    {
+      "id": "research-ux",
+      "type": "research",
+      "description": "UX research: user needs, patterns, accessibility",
+      "agent": "agents/product/ux-researcher.md",
+      "files": ["specs/NNN-feature/research.md"],
+      "dependencies": []
+    }
+  ],
+  "notes": "Both research tasks write to different sections of research.md. The Product Feature Researcher merges their outputs."
+}

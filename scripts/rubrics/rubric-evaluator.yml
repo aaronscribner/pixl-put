@@ -1,0 +1,30 @@
+agent: rubric-evaluator
+version: 1
+
+self_report:
+  - id: raw-stats-cited
+    description: Every claim in the report ties to a row in the Raw stats appendix
+    type: bool
+  - id: every-claim-traces
+    description: Every drift call-out cites a specific criterion ID and an agent-file section
+    type: bool
+  - id: no-agent-file-edits
+    description: Evaluator did not modify any file under agents/
+    type: bool
+  - id: trend-window-checked
+    description: Trends section compares against at least two prior coaching reports if they exist
+    type: bool
+
+ground_truth:
+  - id: recommendations-actioned
+    description: Recommendations from this report were reflected in package version bumps within 30 days
+    source: git-log
+    compute: |
+      track the install-package CHANGELOG for entries matching agent files this report flagged;
+      FAIL if no bumps reference flagged agents within 30d.
+  - id: drift-narrowed-after-recommendation
+    description: For each drift this report flagged, the agent's drift score improved in the report 2 weeks later
+    source: prior coaching reports
+    compute: |
+      open prior coaching report from this report - 14d; for each drift it flagged that is also
+      present in this report, compare drift magnitudes; FAIL if widened.

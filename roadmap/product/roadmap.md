@@ -10,7 +10,7 @@ each milestone is the listed exit criterion, not a calendar.
 multi-instance case right (4 Brave windows, 3 VS Code workspaces). Earn
 trust through correctness, not features.
 
-**Spec**: [`specs/001-core-window-memory/`](../../specs/001-core-window-memory/)
+**Spec**: [`001-core-window-memory/`](./001-core-window-memory/)
 
 **Includes** (from [`features.md`](./features.md) v1 section): all ✅ rows,
 plus the five shipping deep-identity providers (browsers, VS Code, Xcode,

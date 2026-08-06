@@ -5,7 +5,7 @@ The status column indicates whether it is committed (✅), planned (🟡),
 candidate (🟦), or explicitly rejected (❌).
 
 Each feature row links to the spec that owns it, where one exists. v1 rows
-mostly trace to [`spec.md` for spec 001](../../specs/001-core-window-memory/spec.md);
+mostly trace to [`spec.md` for spec 001](./001-core-window-memory/spec.md);
 post-v1 rows do not yet have specs and will need them when promoted.
 
 ## v1 — Core Window Memory (spec 001)

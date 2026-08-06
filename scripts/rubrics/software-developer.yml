@@ -1,0 +1,31 @@
+agent: software-developer
+version: 1
+
+self_report:
+  - id: tests-pass-locally
+    description: Full test suite passes locally before each commit
+    type: bool
+  - id: no-test-changes
+    description: GREEN commits do not modify test files (developer never edits tests)
+    type: bool
+  - id: minimal-code
+    description: The implementation is the smallest reasonable change to make tests pass (no speculative additions)
+    type: bool
+  - id: refactor-no-behavior-change
+    description: REFACTOR commits did not change test outcomes from the GREEN baseline
+    type: bool
+  - id: platform-consulted
+    description: For any new abstraction, platform-mcp was consulted before bespoke implementation (Precept 1)
+    type: bool
+
+ground_truth:
+  - id: pr-passed-without-rework
+    description: PR merged without "request changes" reviews
+    source: gh-pr
+    compute: |
+      gh pr view --json reviews; FAIL if any review state is CHANGES_REQUESTED at any point.
+  - id: refactor-debt-paid
+    description: At least one `refactor:` commit exists between GREEN and PR open
+    source: git-log
+    compute: |
+      count commits matching `^refactor:` between first GREEN and PR-open commit; FAIL if 0.
