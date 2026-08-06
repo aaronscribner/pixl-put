@@ -50,8 +50,22 @@ ZIP="${ROOT}/build/PixlPut.zip"
 
 "${ROOT}/scripts/build-app.sh" release
 
-echo "==> codesign --options runtime"
-codesign --force --deep --options runtime \
+echo "==> codesign (inside-out, hardened runtime on every executable)"
+# NOT --deep: it can't apply per-artifact options and breaks Sparkle's nested
+# signatures on the first update attempt. Notarization requires the hardened
+# runtime on EVERY nested executable, so sign inside-out explicitly.
+SPARKLE_FW="${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
+if [[ -d "${SPARKLE_FW}" ]]; then
+    for xpc in "${SPARKLE_FW}/Versions/B/XPCServices/"*.xpc; do
+        codesign --force --options runtime --sign "${IDENTITY}" "${xpc}"
+    done
+    codesign --force --options runtime --sign "${IDENTITY}" \
+        "${SPARKLE_FW}/Versions/B/Autoupdate"
+    codesign --force --options runtime --sign "${IDENTITY}" \
+        "${SPARKLE_FW}/Versions/B/Updater.app"
+    codesign --force --options runtime --sign "${IDENTITY}" "${SPARKLE_FW}"
+fi
+codesign --force --options runtime \
     --entitlements "${ENT}" \
     --sign "${IDENTITY}" \
     "${APP_BUNDLE}"

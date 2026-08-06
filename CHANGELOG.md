@@ -2,6 +2,41 @@
 
 All notable changes to PixPut (DisplayMaid-Next) are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] — 2026-08-05
+
+First release. Open source; supports one hardware configuration by design
+(Samsung Odyssey G9 dual-4K with Spaces spanning displays — ADR-0003).
+
+### Added
+- **All-Spaces capture** — one Capture click records every window on every
+  Space (CG pass: frame + Space + stable CGWindowID for all Spaces; AX pass:
+  full identity for the active Space). Snapshots replace wholesale; identity
+  learned on visited Spaces carries forward by windowID.
+- **windowID-first restore** — snapshot↔live matching by CG window number,
+  identity only for apps restarted since capture. Restore on every Space
+  switch and after wake, gated by one toggle.
+- **Cross-Space relocation (ADR-0002)** — explicit "Restore windows to their
+  Spaces" command via `CGSProcessAssignToSpace` (per-app, sticky) with a
+  per-window yabai backend when available. Off the automatic path.
+- **MovePolicy** — fast single-attempt AX moves for routine restores; the
+  verify-and-retry clamp defense runs only after wake/display changes.
+
+### Changed
+- Space-switch restore fires on every visit, not only the first after wake;
+  every skipped restore logs its reason to the diagnostic log.
+- System UI (Notification Center, Dock, Control Center) excluded from capture.
+
+### Performance
+- Restore apply: 2–9 ms per Space (previously 6.7–12 s per moved window;
+  full multi-Space pass previously 71 s). Per-move world re-enumeration
+  eliminated; enumeration narrowed to snapshot bundles.
+
+### Known limitations
+- Sparkle update feed not yet live (`updates.pixput.app` unhosted,
+  `SUPublicEDKey` placeholder) — "Check for updates" fails harmlessly.
+- Multi-display setups with "Displays have separate Spaces" are unsupported
+  and refuse Space operations loudly (ADR-0003).
+
 ## [Unreleased] — v0.1.0 (unsigned debug)
 
 ### Added
