@@ -412,24 +412,23 @@ public final class AppLifecycle {
     /// re-establishing — macOS silently clamped the target frame to the
     /// main display and the window appeared not to move.
     private func handleSpaceChange(to spaceIndex: Int) {
-        // Restore on EVERY visit, not just the first one after a wake.
+        // The restore gate for this Space: OPEN on the first visit since the
+        // last wake-ish trigger (system wake, screens-wake, display
+        // reconfiguration, unlock — anything that may have displaced
+        // windows), CLOSED on every later visit (the user owns the layout
+        // until the next such trigger re-arms it). Read it BEFORE recording
+        // the visit — recordSpaceVisit would close the gate we're checking.
         //
-        // The old wake gate ("first visit restores, later visits are owned
-        // by the user") existed to keep auto-capture and auto-restore from
-        // fighting each other. Auto-capture is gone — the snapshot is always
-        // a layout the user chose by clicking Capture — so a Space visit
-        // snapping windows back to that layout IS the product now. §III
-        // idempotence keeps repeat visits free: windows already at their
-        // frame are skipped without an AX write.
-        //
-        // Tradeoff, stated plainly: a window you move and DON'T recapture
-        // will snap back on the next visit to that Space. That's "window
-        // memory" doing its job; recapture is one click.
-        let shouldRestore = statusModel.restoreOnSpaceSwitch
+        // An interim revision restored on EVERY visit. Tradeoff that killed
+        // it: a window you move and don't recapture snaps back on the next
+        // visit to that Space, yanking layouts the user had deliberately
+        // rearranged since wake.
+        let gateOpen = eventLog.shouldRestoreOnSwitch(toSpaceIndex: spaceIndex)
+        let shouldRestore = statusModel.restoreOnSpaceSwitch && gateOpen
         let previouslyVisited = eventLog.lastVisited(spaceIndex: spaceIndex)
         eventLog.recordSpaceVisit(spaceIndex: spaceIndex)
         LoggerRegistry.app.log(.info,
-            "Space changed to index=\(spaceIndex); previously visited=\(previouslyVisited?.description ?? "never"); will-restore=\(shouldRestore)")
+            "Space changed to index=\(spaceIndex); previously visited=\(previouslyVisited?.description ?? "never"); gateOpen=\(gateOpen); will-restore=\(shouldRestore)")
 
         // License gate. If the state blocks auto features (expired/revoked
         // license, trial expired), skip the Space-switch restore — the only
@@ -441,9 +440,15 @@ public final class AppLifecycle {
             return
         }
 
-        // Every skip writes to the diagnostic log. The wake-gate era skipped
-        // silently, which cost a debugging session: "restore didn't work"
-        // with an empty log is indistinguishable from "restore never ran".
+        // Every skip writes to the diagnostic log. The first wake-gate era
+        // skipped silently, which cost a debugging session: "restore didn't
+        // work" with an empty log is indistinguishable from "restore never
+        // ran".
+        guard gateOpen else {
+            DiagnosticLog.write("restore",
+                "SKIP Space-switch restore for space=\(spaceIndex): already visited since last wake (gate closed)")
+            return
+        }
         guard shouldRestore else {
             DiagnosticLog.write("restore",
                 "SKIP Space-switch restore for space=\(spaceIndex): auto-restore toggle is off")
