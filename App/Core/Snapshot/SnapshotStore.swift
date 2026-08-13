@@ -1,12 +1,27 @@
 import Foundation
 
-/// Persists snapshots as binary property-list files (one per display
-/// configuration) under `~/Library/Application Support/DisplayMaid-Next/snapshots/`.
-/// Rotation caps history at `historyLimit` (default 10, per FR-003).
+/// Persists snapshots as binary property-list files — **one per (display
+/// configuration, Space)** — under `~/Library/Application Support/DisplayMaid-Next/snapshots/`.
+/// Rotation caps history at `historyLimit` per Space.
 ///
 /// File layout:
-///   snapshots/<displayConfigurationID>.plist     — most recent snapshot
-///   snapshots/<displayConfigurationID>.N.plist   — historical N=1..historyLimit-1
+///   snapshots/<configID>.space<N>.plist       — Space N's current snapshot
+///   snapshots/<configID>.space<N>.<slot>.plist — Space N's history, slot=1..historyLimit-1
+///
+/// **Why one file per Space?** A capture can only see the Space it is standing
+/// on: AX reports exactly the active Space's windows and nothing else (measured
+/// on macOS 26.2 — 1 window per app where CG saw 7). Keying storage by Space
+/// makes that limitation harmless instead of load-bearing:
+///
+/// - A capture writes one Space's file and cannot disturb another's, so there is
+///   no wholesale replace and no additive cross-capture merge (and none of the
+///   bloat that merge caused).
+/// - Every entry is written by the AX pass while its Space was active, so every
+///   entry carries full deep identity. No windowID-derived placeholder ordinals,
+///   and therefore no two-numberings hazard in `ordinalInApp`.
+/// - Moving a window between Spaces needs no reconciliation: re-capturing the
+///   source Space rewrites it from what is actually there, so the moved window
+///   simply stops being listed.
 ///
 /// **Why binary plist?** ~30% smaller than pretty-printed JSON, slightly
 /// faster to parse, and not casually `cat`-able. Fully debuggable with
@@ -71,18 +86,22 @@ public struct SnapshotStore: Sendable {
 
     // MARK: - Write
 
-    /// Write a new snapshot. Rotates older snapshots one slot down; drops
-    /// the oldest when history limit is exceeded. Atomic per-file via
-    /// `Data.write(to:options:.atomic)`.
-    public func save(_ snapshot: Snapshot) throws {
+    /// Write a Space's snapshot. Rotates that Space's older files one slot
+    /// down; drops the oldest when history limit is exceeded. Atomic per-file
+    /// via `Data.write(to:options:.atomic)`.
+    ///
+    /// `spaceIndex` is the Space the snapshot was captured on. Only that
+    /// Space's files are touched — every other Space is untouched by
+    /// construction, which is the whole point of the layout.
+    public func save(_ snapshot: Snapshot, spaceIndex: Int) throws {
         try bootstrap()
         let configID = snapshot.displayConfigurationID
 
         // Rotate existing files: N → N+1, dropping oldest when N+1 > limit.
-        // Newest snapshot is the unnumbered file. Numbered files start at .1.
-        try rotateForward(configID: configID)
+        // Newest snapshot is the slot-0 file. Numbered files start at .1.
+        try rotateForward(configID: configID, spaceIndex: spaceIndex)
 
-        let url = self.url(for: configID, slot: 0)
+        let url = self.url(for: configID, spaceIndex: spaceIndex, slot: 0)
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         do {
@@ -94,12 +113,12 @@ public struct SnapshotStore: Sendable {
     }
 
     /// Move current → .1, .1 → .2, … dropping the oldest file when it would exceed historyLimit-1.
-    private func rotateForward(configID: String) throws {
+    private func rotateForward(configID: String, spaceIndex: Int) throws {
         // Build list of existing slots (from highest backward), then rename
         // bottom-up so we never overwrite a file we still need to read.
         for slot in stride(from: historyLimit - 1, through: 0, by: -1) {
-            let src = url(for: configID, slot: slot)
-            let dst = url(for: configID, slot: slot + 1)
+            let src = url(for: configID, spaceIndex: spaceIndex, slot: slot)
+            let dst = url(for: configID, spaceIndex: spaceIndex, slot: slot + 1)
             guard fileManager.fileExists(atPath: src.path) else { continue }
             if slot + 1 >= historyLimit {
                 // Drops the would-be-oldest entry.
@@ -113,11 +132,11 @@ public struct SnapshotStore: Sendable {
         }
     }
 
-    private func url(for configID: String, slot: Int) -> URL {
+    private func url(for configID: String, spaceIndex: Int, slot: Int) -> URL {
         if slot == 0 {
-            return directory.appendingPathComponent("\(configID).plist")
+            return directory.appendingPathComponent("\(configID).space\(spaceIndex).plist")
         }
-        return directory.appendingPathComponent("\(configID).\(slot).plist")
+        return directory.appendingPathComponent("\(configID).space\(spaceIndex).\(slot).plist")
     }
 
     // MARK: - Slot inspection (for the restore picker)
@@ -133,10 +152,10 @@ public struct SnapshotStore: Sendable {
         public var id: Int { slot }
     }
 
-    public func listHistory(forConfigurationID configID: String) -> [HistoryEntry] {
+    public func listHistory(forConfigurationID configID: String, spaceIndex: Int) -> [HistoryEntry] {
         var result: [HistoryEntry] = []
         for slot in 0..<historyLimit {
-            let u = url(for: configID, slot: slot)
+            let u = url(for: configID, spaceIndex: spaceIndex, slot: slot)
             guard fileManager.fileExists(atPath: u.path) else { continue }
             // Cheap: just decode for the metadata we care about.
             guard let data = try? Data(contentsOf: u),
@@ -155,38 +174,54 @@ public struct SnapshotStore: Sendable {
 
     /// Load a specific historical slot directly. Used by the picker's
     /// "Apply" button after the user has chosen a row.
-    public func load(forConfigurationID configID: String, slot: Int) throws -> Snapshot? {
-        try loadFromSlot(configID: configID, slot: slot)
+    public func load(forConfigurationID configID: String, spaceIndex: Int, slot: Int) throws -> Snapshot? {
+        try loadFromSlot(configID: configID, spaceIndex: spaceIndex, slot: slot)
     }
 
     /// Permanently delete a specific slot.
-    public func delete(forConfigurationID configID: String, slot: Int) {
-        let u = url(for: configID, slot: slot)
+    public func delete(forConfigurationID configID: String, spaceIndex: Int, slot: Int) {
+        let u = url(for: configID, spaceIndex: spaceIndex, slot: slot)
         try? fileManager.removeItem(at: u)
+    }
+
+    /// Every Space index that currently has a slot-0 config for this display
+    /// configuration, ascending. Lets callers act on "all Spaces we know
+    /// about" without assuming how many Spaces exist.
+    public func spaceIndices(forConfigurationID configID: String) -> [Int] {
+        let names = (try? fileManager.contentsOfDirectory(atPath: directory.path)) ?? []
+        let prefix = "\(configID).space"
+        var found: Set<Int> = []
+        for name in names where name.hasPrefix(prefix) && name.hasSuffix(".plist") {
+            // "<configID>.space<N>.plist" — history slots carry an extra
+            // ".<slot>" component and are deliberately ignored here.
+            let middle = name.dropFirst(prefix.count).dropLast(".plist".count)
+            if let index = Int(middle) { found.insert(index) }
+        }
+        return found.sorted()
     }
 
     // MARK: - Read
 
-    /// Load the most recent snapshot for a display configuration.
-    /// Returns `nil` if no snapshot exists for the configuration.
+    /// Load the most recent snapshot for one Space of a display configuration.
+    /// Returns `nil` if that Space has never been captured.
     /// Throws `unsupportedSchemaVersion` if the file's `schemaVersion` is unknown.
-    public func loadLatest(forConfigurationID configID: String) throws -> Snapshot? {
-        try loadFromSlot(configID: configID, slot: 0)
+    public func loadLatest(forConfigurationID configID: String, spaceIndex: Int) throws -> Snapshot? {
+        try loadFromSlot(configID: configID, spaceIndex: spaceIndex, slot: 0)
     }
 
-    /// All snapshots for a configuration (newest first).
-    public func loadHistory(forConfigurationID configID: String) throws -> [Snapshot] {
+    /// All snapshots for one Space of a configuration (newest first).
+    public func loadHistory(forConfigurationID configID: String, spaceIndex: Int) throws -> [Snapshot] {
         var result: [Snapshot] = []
         for slot in 0..<historyLimit {
-            if let s = try? loadFromSlot(configID: configID, slot: slot) {
+            if let s = try? loadFromSlot(configID: configID, spaceIndex: spaceIndex, slot: slot) {
                 result.append(s)
             }
         }
         return result
     }
 
-    private func loadFromSlot(configID: String, slot: Int) throws -> Snapshot? {
-        let url = self.url(for: configID, slot: slot)
+    private func loadFromSlot(configID: String, spaceIndex: Int, slot: Int) throws -> Snapshot? {
+        let url = self.url(for: configID, spaceIndex: spaceIndex, slot: slot)
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         let data: Data
         do { data = try Data(contentsOf: url) }

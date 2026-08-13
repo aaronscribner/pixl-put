@@ -66,7 +66,52 @@ public actor SnapshotEngine {
             }
         )
 
-        let axWindows = try await axClient.enumerateWindows()
+        // ENUMERATE, THEN SETTLE ON WHICH SPACE THESE WINDOWS BELONG TO.
+        //
+        // AX lags a Space switch. For a moment after you arrive it still reports
+        // the ORIGIN Space's windows while the managed display already reports
+        // the destination — observed three times on 2026-08-12/13, always as
+        // "display says 4, windows on 3", and twice for the same Desktop. It is
+        // a lag, not a coin flip: nine seconds later the same display value was
+        // accepted because the windows had caught up.
+        //
+        // With storage keyed per Space, saving that mismatch would overwrite a
+        // different Space's config. So rather than trusting either source, or
+        // refusing outright and making the user retry by hand, re-enumerate
+        // until the two agree. Only windows belonging to exactly ONE Space may
+        // vote — a sticky "all Desktops" window reports every Space and its
+        // lowest ID masquerades as an answer.
+        var axWindows: [AXWindow] = []
+        var activeSpaceIndex = 0
+        var settleAttempt = 0
+        while true {
+            settleAttempt += 1
+            axWindows = try await axClient.enumerateWindows()
+            activeSpaceIndex = spaceResolver.activeSpaceIndex()
+            let observed = Self.modalSpaceIndex(
+                of: axWindows.compactMap(\.windowID),
+                resolve: { spaceResolver.unambiguousSpaceIndex(forWindowID: $0) }
+            )
+            // Agreement, or no window able to vote (an empty Space) — proceed.
+            guard let observed, observed != activeSpaceIndex else { break }
+
+            guard settleAttempt < Self.spaceSettleAttempts else {
+                DiagnosticLog.write("capture", """
+                    REFUSE-SAVE: Space still disagreeing after \(settleAttempt) attempts \
+                    over \(Int(Double(settleAttempt - 1) * Self.spaceSettleDelaySeconds * 1000))ms. \
+                    Managed display says space \(activeSpaceIndex), windows are on \(observed). \
+                    Writing either would overwrite a good config. trigger=\(trigger)
+                    """)
+                throw CaptureError.spaceChangedDuringCapture(reported: activeSpaceIndex,
+                                                             observed: observed)
+            }
+            DiagnosticLog.write("capture", """
+                SETTLING: display says space \(activeSpaceIndex) but windows are on \(observed) \
+                — AX has not caught up with the Space switch. Re-enumerating \
+                (attempt \(settleAttempt)/\(Self.spaceSettleAttempts)).
+                """)
+            try? await Task.sleep(nanoseconds: UInt64(Self.spaceSettleDelaySeconds * 1_000_000_000))
+        }
         let capturedAt = Date()
 
         // Batch deep-identity fetch — only when explicitly enabled.
@@ -82,15 +127,12 @@ public actor SnapshotEngine {
             }
         }
 
-        let activeSpaceIndex = spaceResolver.activeSpaceIndex()
-
         var entries: [WindowEntry] = []
         entries.reserveCapacity(axWindows.count)
 
         // Track which (bundleID, frame-origin) combinations we've already
-        // emitted from AX so the cross-Space pass below can skip them.
-        // AX windows are all on the ACTIVE Space, so attributing them to
-        // `activeSpaceIndex` is correct.
+        // emitted from AX so later dedupe can skip them. AX windows are all on
+        // the active Space, so attributing them to `activeSpaceIndex` is correct.
         var emittedAXFingerprints: Set<String> = []
 
         for axWindow in axWindows {
@@ -154,67 +196,27 @@ public actor SnapshotEngine {
                 """)
         }
 
-        // CROSS-SPACE (CG) PASS — one pass covers EVERY Space (measured:
-        // 65/65 real windows across 7 Spaces with usable frames).
+        // NO CROSS-SPACE PASS. A capture records exactly the Space it is
+        // standing on, and storage is keyed per Space (SnapshotStore), so the
+        // other Spaces' configs are left untouched rather than guessed at.
         //
-        // This pass was previously removed on the grounds that off-Space
-        // data was unactionable ("AX can't move an off-Space window") and
-        // that CG-weak identity corrupted the merge. Both grounds are gone:
-        // ADR-0002 proved off-Space windows are actionable, and matching is
-        // now windowID-first, so the weak `.ordinal` identity on CG entries
-        // is a fallback label, not the join key. Because this pass is
-        // complete, each capture REPLACES the snapshot wholesale — the
-        // additive cross-capture merge (and its bloat pathology) is gone;
-        // `SnapshotMerger.enrich` only carries identity forward by windowID.
-        var crossSpaceCount = 0
-        let axWindowIDs = Set(entries.compactMap(\.windowID))
-        for cgWindow in CGWindowEnumerator.enumerateAllWindows() {
-            // Same exclusions as the AX pass, same reasons.
-            if Self.bundleBlocklist.contains(cgWindow.bundleID) { continue }
-            let frame = cgWindow.bounds
-            if frame.width < 100 || frame.height < 100 { continue }
-
-            // Skip windows the AX pass already captured with full identity —
-            // windowID join first, frame key as fallback for a nil bridge.
-            if axWindowIDs.contains(cgWindow.windowID) { continue }
-            if emittedAXFingerprints.contains(Self.dedupeKey(bundleID: cgWindow.bundleID, frame: frame)) { continue }
-
-            // A window with no queryable Space (sticky all-Spaces surfaces,
-            // windows mid-teardown, CGS degraded) is skipped outright:
-            // recording it as "Space 0" would pile unqueryables onto the
-            // first Space, which is exactly the corruption the old CG pass
-            // was removed for.
-            guard let spaceIndex = spaceResolver.spaceIndexIfKnown(forWindowID: cgWindow.windowID) else { continue }
-
-            let displayFingerprintID = displays
-                .max(by: { intersectionArea($0.bounds, frame) < intersectionArea($1.bounds, frame) })?
-                .fingerprint.id ?? (displays.first?.fingerprint.id ?? "")
-
-            entries.append(WindowEntry(
-                bundleID: cgWindow.bundleID,
-                // Weak identity by construction — CG exposes no document URL
-                // or tab set, and titles need Screen Recording permission.
-                // The windowID-derived ordinal is stable across captures
-                // (SnapshotMerger.crossSpaceOrdinal rationale); real identity
-                // is enriched from the previous snapshot by windowID, or
-                // captured fresh next time this window's Space is active.
-                identity: .ordinal(SnapshotMerger.crossSpaceOrdinal(forWindowID: cgWindow.windowID)),
-                ordinalInApp: SnapshotMerger.crossSpaceOrdinal(forWindowID: cgWindow.windowID),
-                displayFingerprintID: displayFingerprintID,
-                spaceIndex: spaceIndex,
-                frame: frame,
-                isMinimized: false,
-                isFullscreen: false,
-                capturedAt: capturedAt,
-                windowID: cgWindow.windowID
-            ))
-            crossSpaceCount += 1
-        }
+        // The removed CG pass existed to fill in Spaces AX cannot see. It did
+        // cover them, but only with `.ordinal(windowID)` identity, because CG
+        // exposes no document URL or tab set and `kCGWindowName` is gated
+        // behind Screen Recording (measured: 0 of 88 titles readable). That
+        // placeholder identity is unusable for matching after an app restart
+        // and is skipped outright by per-window relocation planning — so the
+        // pass bought coverage at the cost of every entry's identity, and
+        // forced a wholesale-replace/additive-merge dilemma on the store.
+        //
+        // Per-Space files dissolve all of it: each entry here comes from the AX
+        // pass while its Space was active, so every entry carries full deep
+        // identity, and a window moved between Spaces needs no reconciliation
+        // (re-capturing the source Space rewrites it from what is there now).
         _ = displayUUIDByFingerprintID
         DiagnosticLog.write("capture", """
-            capture done: trigger=\(trigger) activeSpaceIndex=\(activeSpaceIndex) \
-            activeSpaceWindows=\(entries.count - crossSpaceCount) \
-            crossSpaceWindows=\(crossSpaceCount) isSpaceAware=\(self.spaceResolver.isSpaceAware)
+            capture done: trigger=\(trigger) spaceIndex=\(activeSpaceIndex) \
+            windows=\(entries.count) isSpaceAware=\(self.spaceResolver.isSpaceAware)
             """)
 
         // CORRUPTION GUARD: an auto-capture that fires AFTER the display
@@ -226,7 +228,8 @@ public actor SnapshotEngine {
         // a `.manual` trigger, trust that intent).
         let isAutoTrigger = (trigger != .manual)
         let newAXCount = emittedAXFingerprints.count
-        let previousSnapshot = try? store.loadLatest(forConfigurationID: configID)
+        let previousSnapshot = try? store.loadLatest(forConfigurationID: configID,
+                                                     spaceIndex: activeSpaceIndex)
 
         // ABSOLUTE REFUSAL: an auto-capture with zero windows is never
         // legitimate — it's always a transient AX-collapsed state during
@@ -244,7 +247,8 @@ public actor SnapshotEngine {
         }
 
         if isAutoTrigger, let prev = previousSnapshot {
-            let prevAXCount = prev.windows.filter { $0.spaceIndex == activeSpaceIndex }.count
+            // No spaceIndex filter needed: `prev` IS this Space's config.
+            let prevAXCount = prev.windows.count
             // Tiny-capture rule: ≤ 1 window on an auto-trigger when prev
             // had a multi-window arrangement is always the screensaver-
             // fade pattern (Finder ghost window), never legitimate.
@@ -268,30 +272,16 @@ public actor SnapshotEngine {
             }
         }
 
-        // WHOLESALE REPLACE + identity enrichment. The CG pass above covers
-        // every Space, so each capture is complete and the previous
-        // snapshot's entries are never retained — the additive merge (and
-        // its unbounded-growth pathology) is gone. The only thing carried
-        // forward is IDENTITY: an off-Space window captured weakly by CG
-        // inherits the full identity (document URL, tab set, workspace) it
-        // was given the last time its Space was active, joined by windowID.
-        let (mergedEntries, enrichStats) = SnapshotMerger.enrich(
-            current: entries,
-            previous: previousSnapshot?.windows
-        )
-        if previousSnapshot != nil {
-            DiagnosticLog.write("capture", """
-                ENRICH: upgraded \(enrichStats.identityUpgraded) weak entries with previous identity; \
-                \(enrichStats.leftWeak) remain weak (windowID unseen before or app restarted)
-                """)
-        }
-
+        // No merge, and no identity enrichment to carry forward. This file is
+        // one Space, written from the AX pass that just ran on that Space, so
+        // `entries` is already both complete and strongly identified. The
+        // previous snapshot is consulted only by the corruption guards above.
         let snapshot = Snapshot(
             displayConfigurationID: configID,
             displays: displays,
             capturedAt: capturedAt,
             trigger: trigger,
-            windows: mergedEntries
+            windows: entries
         )
 
         // CHANGE GUARD: if the new snapshot has the exact same set of
@@ -300,17 +290,52 @@ public actor SnapshotEngine {
         // user isn't actually moving anything (the common case during
         // normal work — they just navigate between Spaces).
         if let prev = previousSnapshot,
-           Self.snapshotsAreEquivalent(prev.windows, mergedEntries) {
+           Self.snapshotsAreEquivalent(prev.windows, entries) {
             DiagnosticLog.write("capture", """
                 SKIP-SAVE: snapshot unchanged since last capture. \
-                trigger=\(trigger) windows=\(mergedEntries.count). \
+                trigger=\(trigger) spaceIndex=\(activeSpaceIndex) windows=\(entries.count). \
                 Keeping previous snapshot.
                 """)
             return prev
         }
 
-        try store.save(snapshot)
+        try store.save(snapshot, spaceIndex: activeSpaceIndex)
         return snapshot
+    }
+
+    /// How many times to re-enumerate when AX and the managed display disagree
+    /// about which Space we are on, and how long to wait between attempts.
+    /// Worst case adds ~750ms, and only on a capture taken mid-transition; an
+    /// agreeing first pass costs nothing.
+    static let spaceSettleAttempts = 4
+    static let spaceSettleDelaySeconds = 0.25
+
+    public enum CaptureError: Error, Equatable {
+        /// The Space changed while the capture was being taken, so the window
+        /// data and the Space index describe different Spaces. Retrying once the
+        /// transition settles is the fix; the caller should say so.
+        case spaceChangedDuringCapture(reported: Int, observed: Int)
+    }
+
+    /// The Space index most of `windowIDs` sit on, or `nil` when none of them
+    /// can be resolved to a Space.
+    ///
+    /// Ties break toward the lowest index so the answer is deterministic rather
+    /// than dependent on dictionary ordering. A tie means the window server is
+    /// mid-transition and either answer is defensible; what matters is that the
+    /// same input always produces the same file.
+    static func modalSpaceIndex(
+        of windowIDs: [CGWindowID],
+        resolve: (CGWindowID) -> Int?
+    ) -> Int? {
+        var counts: [Int: Int] = [:]
+        for id in windowIDs {
+            guard let index = resolve(id) else { continue }
+            counts[index, default: 0] += 1
+        }
+        return counts
+            .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+            .first?.key
     }
 
     /// Bundles that should never appear in a snapshot. These are system

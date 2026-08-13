@@ -131,7 +131,12 @@ private struct RestorePickerView: View {
 
     private func refresh() {
         let configID = lifecycle.displayEnumerator.configurationID()
-        entries = lifecycle.snapshotStore.listHistory(forConfigurationID: configID)
+        // History is per Space, so the picker shows the Space you're on —
+        // matching what "Apply" will actually restore.
+        entries = lifecycle.snapshotStore.listHistory(
+            forConfigurationID: configID,
+            spaceIndex: lifecycle.spaceResolver.activeSpaceIndex()
+        )
         loadThumbnails()
     }
 
@@ -145,7 +150,11 @@ private struct RestorePickerView: View {
 
     private func runDelete(slot: Int) {
         let configID = lifecycle.displayEnumerator.configurationID()
-        lifecycle.snapshotStore.delete(forConfigurationID: configID, slot: slot)
+        lifecycle.snapshotStore.delete(
+            forConfigurationID: configID,
+            spaceIndex: lifecycle.spaceResolver.activeSpaceIndex(),
+            slot: slot
+        )
         refresh()
         statusMessage = "Deleted slot \(slot)."
     }

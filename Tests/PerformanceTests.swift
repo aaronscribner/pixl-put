@@ -22,7 +22,7 @@ final class PerformanceTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let t0 = Date()
-        try store.save(snap)
+        try store.save(snap, spaceIndex: 0)
         let elapsed = Date().timeIntervalSince(t0)
 
         XCTAssertLessThan(elapsed, 0.050, "Encode+write 100-window snapshot took \(elapsed * 1000)ms; budget is 50ms.")

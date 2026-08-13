@@ -33,6 +33,27 @@ public final class MenuBarController {
 
     private func configureMenu() {
         rebuildMenu()
+        // Surface failures of things the user explicitly asked for. Without
+        // this, a refused capture set `lastError` and nothing else happened,
+        // so it was indistinguishable from success.
+        lifecycle.onUserActionFailed = { [weak self] message in
+            DispatchQueue.main.async { self?.presentFailure(message) }
+        }
+    }
+
+    private func presentFailure(_ message: String) {
+        let alert = NSAlert()
+        alert.messageText = "PixlPut — nothing was saved"
+        alert.informativeText = message
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Copy details")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(message, forType: .string)
+        }
+        statusModel.lastError = nil
     }
 
     private func observeModel() {

@@ -2,6 +2,76 @@
 
 All notable changes to PixPut (DisplayMaid-Next) are documented here. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Releases and rollback
+
+Every release on `main` is an annotated git tag (`v1.0`, `v1.0.1`, …) with a
+matching section below. The tag is the rollback point:
+
+```sh
+git tag -n                      # list releases with their annotations
+git checkout v1.0               # inspect a release
+scripts/build-app.sh release    # rebuild that release's bundle
+```
+
+`CFBundleShortVersionString` in `Resources/Info.plist` is bumped to match the
+tag in the same commit the tag points at, so a running build can always be
+traced back to a commit.
+
+## [1.0.1] — 2026-08-13
+
+Correctness release. Space handling is rebuilt around one file per Space after
+the 1.0.0 layout was found to mis-file and overwrite Space data.
+
+### Changed
+- **Snapshots are stored one file per (display configuration, Space)** —
+  `<configID>.space<N>.plist`, with rotation and history per Space. A capture
+  writes only the Space it was taken on and cannot disturb another's config, so
+  there is no wholesale replace and no additive cross-capture merge.
+- Every restore path (wake, startup, Space switch, Restore now, Restore Picker)
+  reads the config for the Space it is acting on. "Restore windows to their
+  Spaces" unions all Space configs, since per-app relocation planning is the one
+  operation that genuinely needs every Space at once.
+- The active Space index is read from the managed display's own `"Current Space"`
+  entry rather than `CGSGetActiveSpace` — the same array that defines what an
+  index means, so value and ordering cannot disagree.
+
+### Fixed
+- **Cross-Space restore collapsed whole apps onto one Space.** The planner's
+  tie-break compared `ordinalInApp` values from two incommensurable numberings
+  (AX creation ordinals `0,1,2…` against CG window numbers `~30000+`), so ties
+  always resolved to whichever Space was active at capture time. Observed as
+  every VS Code window being moved to Space 0.
+- **Relocation could misplace more windows than it placed.** Per-app assignment
+  is now skipped unless it strictly places more windows than it displaces, and
+  skipped apps are reported (`Plan.unrestorable`) rather than silently collapsed.
+- **Captures could be filed under the wrong Space, overwriting a good config.**
+  AX lags a Space switch, briefly reporting the origin Space's windows while the
+  display reports the destination. Capture now re-enumerates up to 4 times at
+  250 ms until the two agree, and refuses to save if they never do.
+- **Sticky "all Desktops" windows corrupted the Space vote.** They report every
+  Space, and taking the first ID made them all vote for Space 0; in small
+  captures they formed a majority and pulled three separate Desktops onto
+  Space 0. Only windows belonging to exactly one Space may vote.
+- **A Space with no config failed silently** on Space-switch restore — the skip
+  went to `os_log` only. It now writes to the diagnostic log.
+- **Failed user actions were invisible.** `statusModel.lastError` only reached
+  the user if they opened the menu and clicked the error row, so a refused
+  Capture Now looked identical to a successful one. Manual actions that fail now
+  raise an alert saying nothing was saved.
+
+### Removed
+- The cross-Space CG capture pass. It covered every Space but could only label
+  off-Space windows `.ordinal(windowID)` — CG exposes no document URL or tab set
+  and `kCGWindowName` is gated behind Screen Recording (measured: 0 of 88 titles
+  readable). Per-Space storage makes it unnecessary: every entry now comes from
+  the AX pass while its Space was active, so identity is strong throughout.
+- `SnapshotMerger` (identity enrichment by windowID, `crossSpaceOrdinal`) — dead
+  once the CG pass was gone, and the source of the two-numberings hazard above.
+
+### Migration
+Existing `<configID>.plist` snapshots are not read by the new store and are
+ignored. Capture each Space once, while on it, to rebuild the configs.
+
 ## [1.0.0] — 2026-08-05
 
 First release. Open source; supports one hardware configuration by design

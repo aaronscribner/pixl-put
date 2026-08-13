@@ -34,6 +34,15 @@ public final class AppLifecycle {
     public let eventLog: EventLog
 
     public let statusModel: MenuBarStatusModel
+
+    /// Called when an action the user explicitly asked for fails.
+    ///
+    /// `statusModel.lastError` alone is not enough: it only reaches the user if
+    /// they happen to open the menu and click the error row. A Capture Now that
+    /// refused to save therefore looked identical to one that succeeded — the
+    /// user believed Desktops 4 and 5 were captured for a full day (2026-08-12).
+    /// Failures the user is standing right in front of must announce themselves.
+    public var onUserActionFailed: ((String) -> Void)?
     public let licenseValidator: LicenseValidator
     public let thumbnailStore: ThumbnailStore
 
@@ -196,21 +205,21 @@ public final class AppLifecycle {
                 do {
                     // Find a snapshot matching the active display configuration.
                     let configID = enumerator.configurationID()
-                    guard let snapshot = try store.loadLatest(forConfigurationID: configID) else {
-                        logger.log(.info, "Wake trigger fired but no snapshot exists for active config \(configID)")
+                    // Storage is keyed per Space, so loading the active Space's
+                    // config is what scopes the restore — there are no other
+                    // Spaces' entries in this file to mis-pair against. (The
+                    // old global snapshot needed an explicit filter here: an
+                    // entry for "Brave/<URL>" on Space 0 could pair with the
+                    // same URL's live window on Space 5 and apply Space 0's
+                    // frame.) Lazy Space-switch restores cover the rest as the
+                    // user visits them.
+                    let activeSpace = spaceResolverRef.activeSpaceIndex()
+                    guard let snapshot = try store.loadLatest(forConfigurationID: configID,
+                                                              spaceIndex: activeSpace) else {
+                        logger.log(.info, "Wake trigger fired but no snapshot exists for config \(configID) space \(activeSpace)")
                         return
                     }
                     let activeIDs = Set(enumerator.enumerate().map(\.fingerprint.id))
-                    // Scope to the active Space. Without this, the restore
-                    // tries to PAIR every entry across all 6 Spaces against
-                    // the live AX enumeration (which only sees the active
-                    // Space's windows), causing identity-name collisions
-                    // — e.g. a snapshot entry for "Brave/<URL>" on Space 0
-                    // can pair with the same URL's live window currently
-                    // on Space 5, and apply Space-0's frame. Lazy Space-
-                    // switch restores cover the other Spaces as the user
-                    // visits them.
-                    let activeSpace = spaceResolverRef.activeSpaceIndex()
                     let report = try await restorerLocal.apply(
                         snapshot,
                         activeDisplayFingerprintIDs: activeIDs,
@@ -362,9 +371,11 @@ public final class AppLifecycle {
                 return
             }
             let configID = enumeratorStart.configurationID()
-            guard let snapshot = try? storeStart.loadLatest(forConfigurationID: configID) else {
+            let startupSpace = self.spaceResolver.activeSpaceIndex()
+            guard let snapshot = try? storeStart.loadLatest(forConfigurationID: configID,
+                                                            spaceIndex: startupSpace) else {
                 DiagnosticLog.write("startup",
-                    "No snapshot to restore on startup for config \(configID)")
+                    "No snapshot to restore on startup for config \(configID) space \(startupSpace)")
                 return
             }
             let activeIDs = Set(enumeratorStart.enumerate().map(\.fingerprint.id))
@@ -485,9 +496,19 @@ public final class AppLifecycle {
                     return
                 }
                 do {
-                    guard let snapshot = try self.snapshotStore.loadLatest(forConfigurationID: configID) else {
+                    guard let snapshot = try self.snapshotStore.loadLatest(forConfigurationID: configID,
+                                                                          spaceIndex: spaceIndex) else {
+                        // Must reach the DIAGNOSTIC log, not just os_log. A Space
+                        // that has never been captured is the single most likely
+                        // reason a restore "didn't work", and routing it to
+                        // os_log alone made Desktops 4 and 5 fail silently on
+                        // 2026-08-12 — indistinguishable from a broken restore.
+                        DiagnosticLog.write("restore", """
+                            SKIP Space-switch restore for space=\(spaceIndex): \
+                            no config for this Space yet — capture it once while you're on it.
+                            """)
                         LoggerRegistry.app.log(.info,
-                            "Space-switch restore skipped: no snapshot for config \(configID)")
+                            "Space-switch restore skipped: no config for space \(spaceIndex) of \(configID)")
                         return
                     }
                     let activeIDs = Set(self.displayEnumerator.enumerate().map(\.fingerprint.id))
@@ -648,6 +669,9 @@ public final class AppLifecycle {
                 let msg = Self.describe(error: error, operation: "capture")
                 statusModel.lastError = msg
                 LoggerRegistry.app.log(.error, "Manual capture failed: \(error)")
+                // The user pressed Capture Now and is waiting on an answer. Say
+                // it out loud rather than parking it behind a menu click.
+                onUserActionFailed?(msg)
             }
         }
     }
@@ -673,9 +697,11 @@ public final class AppLifecycle {
             }
             do {
                 let configID = displayEnumerator.configurationID()
-                guard let snap = try snapshotStore.loadLatest(forConfigurationID: configID) else {
-                    statusModel.lastError = "No snapshot exists for the current display configuration (\(configID)). Capture first."
-                    LoggerRegistry.app.log(.info, "Manual restore: no snapshot for config \(configID)")
+                let activeSpace = spaceResolver.activeSpaceIndex()
+                guard let snap = try snapshotStore.loadLatest(forConfigurationID: configID,
+                                                              spaceIndex: activeSpace) else {
+                    statusModel.lastError = "No snapshot for this Space (\(activeSpace + 1)) on the current display configuration. Capture first."
+                    LoggerRegistry.app.log(.info, "Manual restore: no config for space \(activeSpace) of \(configID)")
                     return
                 }
                 // Manual "Restore now" restores ONLY the active Space. It
@@ -749,10 +775,36 @@ public final class AppLifecycle {
             }
             do {
                 let configID = displayEnumerator.configurationID()
-                guard let snap = try snapshotStore.loadLatest(forConfigurationID: configID) else {
-                    statusModel.lastError = "No snapshot exists for the current display configuration (\(configID)). Capture first."
+                // Relocation planning is the one operation that genuinely needs
+                // every Space at once — it decides, per app, which Space to
+                // send that app's windows to. So union each Space's config into
+                // one working snapshot. Every other path reads a single Space.
+                let knownSpaces = snapshotStore.spaceIndices(forConfigurationID: configID)
+                var unioned: [WindowEntry] = []
+                var newestCapture: Date?
+                var unionDisplays: [DisplaySnapshot] = []
+                for index in knownSpaces {
+                    guard let s = try? snapshotStore.loadLatest(forConfigurationID: configID,
+                                                                spaceIndex: index) else { continue }
+                    unioned.append(contentsOf: s.windows)
+                    if newestCapture == nil || s.capturedAt > newestCapture! {
+                        newestCapture = s.capturedAt
+                        unionDisplays = s.displays
+                    }
+                }
+                guard !unioned.isEmpty, let capturedAt = newestCapture else {
+                    statusModel.lastError = "No Space configs exist for the current display configuration (\(configID)). Capture first."
                     return
                 }
+                let snap = Snapshot(
+                    displayConfigurationID: configID,
+                    displays: unionDisplays,
+                    capturedAt: capturedAt,
+                    trigger: .manual,
+                    windows: unioned
+                )
+                LoggerRegistry.app.log(.info,
+                    "Restore Spaces: unioned \(unioned.count) window(s) from space configs \(knownSpaces)")
 
                 // Prefer per-window relocation (yabai) when it's available;
                 // otherwise the always-present per-app backend.
@@ -791,13 +843,29 @@ public final class AppLifecycle {
                         DiagnosticLog.write("restore-spaces",
                             "\(outcome.bundleID) -> space \(outcome.targetSpaceIndex): \(outcome.failureReason ?? "unknown")")
                     }
+                    // Apps the do-no-harm guard skipped. Logged individually so
+                    // the skip is auditable — silently omitting them would read
+                    // as "PixPut ignored my windows".
+                    for skipped in plan.unrestorable {
+                        DiagnosticLog.write("restore-spaces",
+                            "\(skipped.bundleID): LEFT ALONE — \(skipped.windowCount) window(s) across "
+                            + "\(skipped.spaceCount) Spaces; best target would place "
+                            + "\(skipped.bestCaseSatisfied) and misplace \(skipped.bestCaseDisplaced)")
+                    }
+                    if !plan.unrestorable.isEmpty {
+                        let apps = plan.unrestorable.map(\.bundleID).joined(separator: ", ")
+                        notes.append("\(plan.totalLeftAlone) window(s) left where they are: "
+                            + "\(apps) had windows spread across Spaces, and macOS moves an app's "
+                            + "windows together — collapsing them onto one Space would misplace more "
+                            + "than it fixes. Move these by hand.")
+                    }
                     // Surface the process-scoped limit plainly — a partial
                     // restore the user isn't told about reads as a bug.
                     if plan.totalDisplaced > 0 {
                         let apps = plan.partial.map(\.bundleID).joined(separator: ", ")
                         notes.append("\(plan.totalDisplaced) window(s) couldn't be placed: "
                             + "\(apps) had windows on more than one Space, and macOS moves an app's "
-                            + "windows together. Install yabai for per-window Spaces.")
+                            + "windows together.")
                     }
                     if failedCount > 0 {
                         notes.append("\(failedCount) app(s) couldn't be relocated — see Settings → Snapshots.")
@@ -845,8 +913,11 @@ public final class AppLifecycle {
             }
             do {
                 let configID = displayEnumerator.configurationID()
-                guard let snap = try snapshotStore.load(forConfigurationID: configID, slot: slot) else {
-                    statusModel.lastError = "Snapshot slot \(slot) is empty."
+                let pickerSpace = spaceResolver.activeSpaceIndex()
+                guard let snap = try snapshotStore.load(forConfigurationID: configID,
+                                                        spaceIndex: pickerSpace,
+                                                        slot: slot) else {
+                    statusModel.lastError = "Slot \(slot) is empty for this Space (\(pickerSpace + 1))."
                     return
                 }
                 let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
@@ -866,6 +937,13 @@ public final class AppLifecycle {
 
     /// User-facing error string for capture / restore failures.
     private static func describe(error: Error, operation: String) -> String {
+        if case SnapshotEngine.CaptureError.spaceChangedDuringCapture(let reported, let observed) = error {
+            // Deliberately actionable: nothing was written, and waiting a beat
+            // is the whole fix.
+            return "Space was still changing — nothing was saved. "
+                + "The system reported Desktop \(reported + 1) but the windows were on Desktop \(observed + 1). "
+                + "Wait a second after switching Spaces, then capture again."
+        }
         if let axError = error as? AXClient.AXError {
             switch axError {
             case .permissionDenied:

@@ -35,12 +35,29 @@ public struct SpaceResolver: Sendable {
     /// belongs to. Space relocation refuses rather than guessing.
     public var hasSupportedSpaceConfiguration: Bool { PrivateCGS.isSingleManagedSpaceSet }
 
-    /// Best-effort active-space ID. Returns 0 in degraded mode.
+    /// The active Space's per-display index. Returns 0 in degraded mode.
+    ///
+    /// Reads the managed-display structure's own `"Current Space"` first, so the
+    /// value and the index ordering come from one snapshot of one API and cannot
+    /// disagree. `CGSGetActiveSpace` is the fallback: it is a separate,
+    /// connection-scoped query that has been seen reporting a different Space
+    /// than the managed display during a switch transition.
     public func activeSpaceIndex() -> Int {
+        if let index = PrivateCGS.currentSpaceIndex() { return index }
         guard let id = PrivateCGS.activeSpaceID() else { return 0 }
-        // The on-disk format uses Int spaceIndex relative to the display;
-        // we map the global space ID into the per-display index below.
         return mapToPerDisplayIndex(spaceID: id, displayUUID: nil) ?? 0
+    }
+
+    /// The Space index of a window that belongs to exactly one Space, or `nil`
+    /// for sticky "all Desktops" windows and windows mid-teardown.
+    ///
+    /// Distinct from `spaceIndexIfKnown(forWindowID:)`, which takes the first of
+    /// however many Spaces a window reports. That is fine for "roughly where is
+    /// this window", and wrong for voting: see
+    /// `PrivateCGS.unambiguousSpace(forWindow:)`.
+    public func unambiguousSpaceIndex(forWindowID windowID: CGWindowID) -> Int? {
+        guard let id = PrivateCGS.unambiguousSpace(forWindow: windowID) else { return nil }
+        return mapToPerDisplayIndex(spaceID: id, displayUUID: nil)
     }
 
     /// Per-display per-space index (the value stored in `WindowEntry.spaceIndex`).

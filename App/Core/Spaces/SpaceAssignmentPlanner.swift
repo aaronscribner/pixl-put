@@ -35,15 +35,53 @@ public enum SpaceAssignmentPlanner {
         }
     }
 
+    /// An app the process-scoped mechanism cannot help: its best available
+    /// target would misplace at least as many windows as it places. Left
+    /// untouched rather than collapsed onto one Space.
+    public struct Unrestorable: Equatable, Sendable {
+        public let bundleID: String
+        /// Visible windows that voted.
+        public let windowCount: Int
+        /// How many distinct Spaces those windows occupied.
+        public let spaceCount: Int
+        /// What the best target would have achieved, recorded for the log so
+        /// the skip is auditable rather than a silent omission.
+        public let bestCaseSatisfied: Int
+        public let bestCaseDisplaced: Int
+
+        public init(
+            bundleID: String,
+            windowCount: Int,
+            spaceCount: Int,
+            bestCaseSatisfied: Int,
+            bestCaseDisplaced: Int
+        ) {
+            self.bundleID = bundleID
+            self.windowCount = windowCount
+            self.spaceCount = spaceCount
+            self.bestCaseSatisfied = bestCaseSatisfied
+            self.bestCaseDisplaced = bestCaseDisplaced
+        }
+    }
+
     public struct Plan: Equatable, Sendable {
         public let assignments: [Assignment]
-        public init(assignments: [Assignment]) { self.assignments = assignments }
+        /// Apps deliberately left alone because moving them would do net harm.
+        public let unrestorable: [Unrestorable]
+
+        public init(assignments: [Assignment], unrestorable: [Unrestorable] = []) {
+            self.assignments = assignments
+            self.unrestorable = unrestorable
+        }
 
         /// Apps whose windows spanned Spaces at capture time and so cannot be
         /// fully restored. Drives the "restored N of M" UI copy.
         public var partial: [Assignment] { assignments.filter { !$0.isExact } }
         public var totalSatisfied: Int { assignments.reduce(0) { $0 + $1.satisfiedWindows } }
         public var totalDisplaced: Int { assignments.reduce(0) { $0 + $1.displacedWindows } }
+        /// Windows left where they are by the do-no-harm guard. Distinct from
+        /// `totalDisplaced`, which counts windows this plan *will* misplace.
+        public var totalLeftAlone: Int { unrestorable.reduce(0) { $0 + $1.windowCount } }
     }
 
     /// Build the plan from snapshot entries.
@@ -51,10 +89,22 @@ public enum SpaceAssignmentPlanner {
     /// Target selection per app, in order:
     /// 1. The Space holding the most of that app's windows — moving the
     ///    majority is strictly better than moving the minority.
-    /// 2. On a tie, the Space of the window with the lowest `ordinalInApp`.
-    ///    That is the earliest-created window, which is the closest proxy for
-    ///    "the primary window" available in a snapshot, and it makes the plan
-    ///    deterministic rather than dependent on dictionary ordering.
+    /// 2. On a tie, the lowest Space index. Purely a determinism tie-break:
+    ///    a tied top count can never clear the do-no-harm guard below (if the
+    ///    top two Spaces both hold `n`, then `displaced >= n = satisfied`), so
+    ///    this only decides what gets *reported* as the best case.
+    ///
+    /// The tie-break deliberately does **not** use `ordinalInApp`. Historically
+    /// that field carried two incommensurable numberings — an AX creation
+    /// ordinal (0, 1, 2…) from the active-Space pass, and the CG window number
+    /// (~30000+) from the cross-Space pass — and comparing them ranked whichever
+    /// Space happened to be active at capture time above every other Space, so
+    /// ties collapsed the whole app onto the capture Space while the code
+    /// claimed to be choosing "the earliest-created window". Per-Space storage
+    /// retired the cross-Space pass, so every ordinal is an AX ordinal again,
+    /// but the values still are not comparable *across* Spaces: each Space's
+    /// file is captured independently. Any future heuristic here must use a
+    /// field that means the same thing in every Space's config.
     ///
     /// Minimized windows are excluded from the vote: they are not visibly on
     /// any Space, so letting them outvote visible windows would move the ones
@@ -66,6 +116,7 @@ public enum SpaceAssignmentPlanner {
         }
 
         var assignments: [Assignment] = []
+        var unrestorable: [Unrestorable] = []
         for (bundleID, entries) in byBundle {
             let voting = entries.filter { !$0.isMinimized }
             // An app with nothing but minimized windows has no meaningful
@@ -75,31 +126,47 @@ public enum SpaceAssignmentPlanner {
             var countBySpace: [Int: Int] = [:]
             for entry in voting { countBySpace[entry.spaceIndex, default: 0] += 1 }
 
+            // Most windows wins; lowest Space index breaks the tie.
             let target = countBySpace
-                .map { space, count -> (space: Int, count: Int, primacy: Int) in
-                    let lowestOrdinal = voting
-                        .filter { $0.spaceIndex == space }
-                        .map(\.ordinalInApp)
-                        .min() ?? Int.max
-                    return (space, count, lowestOrdinal)
-                }
-                // Most windows wins; earliest-created window breaks the tie.
                 .sorted { lhs, rhs in
-                    lhs.count != rhs.count ? lhs.count > rhs.count : lhs.primacy < rhs.primacy
+                    lhs.value != rhs.value ? lhs.value > rhs.value : lhs.key < rhs.key
                 }
                 .first
 
             guard let target else { continue }
+            let satisfied = target.value
+            let displaced = voting.count - satisfied
+
+            // Do no harm. The move is process-scoped: it drags EVERY window of
+            // the app onto one Space. Unless it strictly places more windows
+            // than it misplaces, leaving the app where it is beats collapsing
+            // it — and because the assignment is sticky for the app's process
+            // lifetime (ADR-0002), a bad collapse outlives the restore and
+            // captures newly opened windows too.
+            guard satisfied > displaced else {
+                unrestorable.append(Unrestorable(
+                    bundleID: bundleID,
+                    windowCount: voting.count,
+                    spaceCount: countBySpace.count,
+                    bestCaseSatisfied: satisfied,
+                    bestCaseDisplaced: displaced
+                ))
+                continue
+            }
+
             assignments.append(Assignment(
                 bundleID: bundleID,
-                targetSpaceIndex: target.space,
-                satisfiedWindows: target.count,
-                displacedWindows: voting.count - target.count
+                targetSpaceIndex: target.key,
+                satisfiedWindows: satisfied,
+                displacedWindows: displaced
             ))
         }
 
         // Stable output so the plan is reproducible across runs.
-        return Plan(assignments: assignments.sorted { $0.bundleID < $1.bundleID })
+        return Plan(
+            assignments: assignments.sorted { $0.bundleID < $1.bundleID },
+            unrestorable: unrestorable.sorted { $0.bundleID < $1.bundleID }
+        )
     }
 
     // MARK: - Per-window planning (yabai backend)

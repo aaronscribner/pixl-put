@@ -160,6 +160,56 @@ enum PrivateCGS {
         spacesForWindows([windowID])[windowID] ?? []
     }
 
+    /// The one Space a window belongs to, or `nil` when it reports zero Spaces
+    /// (mid-teardown) **or more than one** (a sticky "all Desktops" window).
+    ///
+    /// The multi-Space case is the important one. Taking `.first` of a sticky
+    /// window's list looks like an answer but is really just the lowest Space
+    /// ID in the set, so sticky windows all "vote" for the first Space. In a
+    /// capture with only a handful of windows they form a majority and drag the
+    /// whole capture onto Space index 0 — measured 2026-08-12, three separate
+    /// Desktops filed as Space 0. A window on every Space carries no
+    /// information about which Space is active, so it must not vote at all.
+    static func unambiguousSpace(forWindow windowID: CGWindowID) -> CGSSpaceID? {
+        let all = spaces(forWindow: windowID)
+        return all.count == 1 ? all.first : nil
+    }
+
+    /// The active Space's per-display index, taken from the managed-display
+    /// structure's own `"Current Space"` entry.
+    ///
+    /// Preferred over `CGSGetActiveSpace` because it is read from the *same*
+    /// array that defines what an index means, so the value and the ordering
+    /// cannot disagree. `CGSGetActiveSpace` is a separate, connection-scoped
+    /// query; during a Space-switch transition the two have been observed
+    /// reporting different Spaces.
+    static func currentSpaceIndex(displayUUID: String? = nil) -> Int? {
+        let s = symbols()
+        guard let conn = s.mainConnectionID?(),
+              let copyFn = s.copyManagedDisplaySpaces,
+              let result = copyFn(conn) else {
+            return nil
+        }
+        let array = result.takeRetainedValue() as Array
+        var candidates: [(uuid: String, index: Int)] = []
+        for entry in array {
+            guard let dict = entry as? [String: Any],
+                  let uuid = dict["Display Identifier"] as? String,
+                  let spaces = dict["Spaces"] as? [[String: Any]],
+                  let current = (dict["Current Space"] as? [String: Any])?["id64"] as? UInt64
+            else { continue }
+            let ids = spaces.compactMap { $0["id64"] as? UInt64 }
+            guard let index = ids.firstIndex(of: current) else { continue }
+            candidates.append((uuid, index))
+        }
+        if let uuid = displayUUID, let match = candidates.first(where: { $0.uuid == uuid }) {
+            return match.index
+        }
+        // Same rule as `spaceID(atIndex:displayUUID:)`: without a usable display
+        // hint an index only means something when there is one managed set.
+        return candidates.count == 1 ? candidates[0].index : nil
+    }
+
     /// The ordered Space IDs of every managed display, keyed by display UUID.
     /// Index into the array is the per-display Space index used on disk.
     static func orderedSpaceIDs(forDisplayUUID uuid: String) -> [CGSSpaceID] {

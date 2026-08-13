@@ -56,27 +56,81 @@ final class SpaceAssignmentPlannerTests: XCTestCase {
         XCTAssertEqual(plan.totalDisplaced, 1)
     }
 
-    func test_tieBreaksOnEarliestCreatedWindow_notDictionaryOrder() {
-        // One window on each of Spaces 7 and 2. The window with the lowest
-        // ordinal (created first) is the closest proxy for "primary".
+    func test_tiedSpaces_leaveTheAppAloneRatherThanCollapsingIt() {
+        // One window on each of Spaces 7 and 2. Whichever is chosen misplaces
+        // as many as it places, so the app must not be moved at all.
         let plan = SpaceAssignmentPlanner.plan(for: [
             entry("com.apple.Safari", space: 7, ordinal: 4),
             entry("com.apple.Safari", space: 2, ordinal: 1),
         ])
-        XCTAssertEqual(plan.assignments.first?.targetSpaceIndex, 2)
-        XCTAssertEqual(plan.assignments.first?.displacedWindows, 1)
+        XCTAssertTrue(plan.assignments.isEmpty, "a tie can never place more than it misplaces")
+        XCTAssertEqual(plan.unrestorable.map(\.bundleID), ["com.apple.Safari"])
+        XCTAssertEqual(plan.unrestorable.first?.windowCount, 2)
+        XCTAssertEqual(plan.unrestorable.first?.spaceCount, 2)
+        XCTAssertEqual(plan.totalLeftAlone, 2)
     }
 
-    func test_tieBreakIsDeterministicAcrossRepeatedRuns() {
+    /// The bug that collapsed every VS Code window onto Space 0.
+    ///
+    /// `ordinalInApp` carries an AX creation ordinal for windows captured on the
+    /// active Space and `Int(windowID)` for windows found by the cross-Space CG
+    /// pass. The old tie-break compared those two numberings directly, so the
+    /// capture Space — the only one with single-digit ordinals — won every tie
+    /// and dragged the whole app onto it.
+    func test_capturePassOrdinalsDoNotDecideTheTarget() {
+        // Space 0 was active at capture (AX ordinals). Spaces 1 and 2 hold more
+        // windows between them but were found by the CG pass, so their ordinals
+        // are CG window numbers.
+        let windows = [
+            entry("com.microsoft.VSCode", space: 0, ordinal: 0),
+            entry("com.microsoft.VSCode", space: 0, ordinal: 1),
+            entry("com.microsoft.VSCode", space: 1, ordinal: 31_204),
+            entry("com.microsoft.VSCode", space: 1, ordinal: 31_207),
+            entry("com.microsoft.VSCode", space: 1, ordinal: 31_211),
+            entry("com.microsoft.VSCode", space: 2, ordinal: 30_988),
+        ]
+        let plan = SpaceAssignmentPlanner.plan(for: windows)
+        XCTAssertNotEqual(plan.assignments.first?.targetSpaceIndex, 0,
+                          "Space 0 held the fewest windows; only its AX ordinals made it win")
+        // Space 1 holds 3 of 6 — a plurality, but it misplaces 3, so the guard
+        // leaves the app alone instead.
+        XCTAssertTrue(plan.assignments.isEmpty)
+        XCTAssertEqual(plan.unrestorable.first?.bundleID, "com.microsoft.VSCode")
+        XCTAssertEqual(plan.unrestorable.first?.bestCaseSatisfied, 3)
+        XCTAssertEqual(plan.unrestorable.first?.bestCaseDisplaced, 3)
+    }
+
+    func test_clearMajoritySurvivesTheGuard_evenWithCGOrdinals() {
+        // 4 on Space 2 against 1 on Space 0: strictly more placed than
+        // misplaced, so the move is worth making regardless of which pass
+        // captured which window.
+        let plan = SpaceAssignmentPlanner.plan(for: [
+            entry("com.brave.Browser", space: 0, ordinal: 0),
+            entry("com.brave.Browser", space: 2, ordinal: 30_101),
+            entry("com.brave.Browser", space: 2, ordinal: 30_102),
+            entry("com.brave.Browser", space: 2, ordinal: 30_103),
+            entry("com.brave.Browser", space: 2, ordinal: 30_104),
+        ])
+        XCTAssertEqual(plan.assignments.first?.targetSpaceIndex, 2)
+        XCTAssertEqual(plan.assignments.first?.satisfiedWindows, 4)
+        XCTAssertEqual(plan.assignments.first?.displacedWindows, 1)
+        XCTAssertTrue(plan.unrestorable.isEmpty)
+    }
+
+    func test_planIsDeterministicAcrossRepeatedRuns() {
         // Guards against relying on Dictionary iteration order, which varies
-        // per process launch.
+        // per process launch. Mixes a kept assignment with a skipped app so
+        // both output arrays are exercised.
         let windows = [
             entry("com.apple.Safari", space: 7, ordinal: 4),
             entry("com.apple.Safari", space: 2, ordinal: 1),
             entry("com.apple.Terminal", space: 5, ordinal: 2),
+            entry("com.apple.Terminal", space: 5, ordinal: 3),
             entry("com.apple.Terminal", space: 6, ordinal: 0),
         ]
         let first = SpaceAssignmentPlanner.plan(for: windows)
+        XCTAssertEqual(first.assignments.map(\.bundleID), ["com.apple.Terminal"])
+        XCTAssertEqual(first.unrestorable.map(\.bundleID), ["com.apple.Safari"])
         for _ in 0..<50 {
             XCTAssertEqual(SpaceAssignmentPlanner.plan(for: windows), first)
         }
