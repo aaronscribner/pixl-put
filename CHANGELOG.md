@@ -17,6 +17,32 @@ scripts/build-app.sh release    # rebuild that release's bundle
 tag in the same commit the tag points at, so a running build can always be
 traced back to a commit.
 
+## [1.0.2] — 2026-08-13
+
+Restore-side counterpart to 1.0.1's capture fixes, plus diagnostics that answer
+"which Space did that act on" without cross-referencing files.
+
+### Fixed
+- **Restore could apply another Space's frames to your windows.** No restore path
+  verified the active Space index, and `restoreNow` read it *twice* — once to
+  choose the config and again for `onlySpaceIndex` — so a Space switch landing
+  between the two reads loaded one Space's config and filtered it for another.
+  All restore paths now take a single verified index
+  (`SpaceResolver.settledActiveSpaceIndex`), retrying until the display and the
+  on-screen windows agree, the same discipline capture got in 1.0.1.
+- **Errored moves incremented no counter**, so a failed move vanished from the
+  restore totals and they no longer summed to the entries considered.
+- Restore's `apply done` line now records `space=`, `entries=`, `accounted=` and
+  flags `UNACCOUNTED` when the counters do not sum, so an entry can no longer go
+  missing quietly.
+- "No config for this Space" on manual restore and on wake restore logged to
+  `os_log` only; both now write to the diagnostic log naming the Space.
+
+### Note on Space numbering
+Spaces are 0-based everywhere internal — filenames (`space0`…`space5`), the
+diagnostic log, and all code. macOS labels the same Spaces "Desktop 1–6" in its
+own UI, so index N is Desktop N+1.
+
 ## [1.0.1] — 2026-08-13
 
 Correctness release. Space handling is rebuilt around one file per Space after

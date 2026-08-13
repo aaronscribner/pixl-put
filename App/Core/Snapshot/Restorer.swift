@@ -342,6 +342,7 @@ public actor Restorer {
         var moved = 0
         var skippedAlreadyAtFrame = 0
         var skippedMissingWindow = 0
+        var errored = 0
         var displacedNoMatchingDisplay = 0
         var cancelledByUserInteraction = 0
         var fullscreenAttempts = 0
@@ -542,16 +543,28 @@ public actor Restorer {
             case .cancelledDisplaced:      cancelledByUserInteraction += 1
             case .fullscreenSucceeded:     fullscreenSucceeded += 1; moved += 1
             case .fullscreenCancelled:     cancelledByUserInteraction += 1
-            case .errored:                 ()  // already logged; no counter
+            case .errored:                 errored += 1
             }
         }
 
+        // `space=` and `entries=` so the log answers "which Space did this act
+        // on, and did every entry land somewhere" without cross-referencing the
+        // config files. Their absence turned a one-line question into a
+        // multi-step investigation on 2026-08-13.
+        //
+        // `errored` used to increment nothing, so a failed move silently
+        // vanished from the totals and they no longer summed to `entries`.
+        let accounted = moved + skippedAlreadyAtFrame + skippedMissingWindow
+            + cancelledByUserInteraction + errored
         DiagnosticLog.write("restore", """
-            apply done: moved=\(moved) skippedAlreadyAtFrame=\(skippedAlreadyAtFrame) \
+            apply done: space=\(onlySpaceIndex.map(String.init) ?? "all") \
+            entries=\(entriesToConsider.count) accounted=\(accounted) \
+            moved=\(moved) skippedAlreadyAtFrame=\(skippedAlreadyAtFrame) \
             skippedMissingWindow=\(skippedMissingWindow) \
             displacedNoMatchingDisplay=\(displacedNoMatchingDisplay) \
-            cancelledByUserInteraction=\(cancelledByUserInteraction) \
-            fullscreenAttempts=\(fullscreenAttempts) fullscreenSucceeded=\(fullscreenSucceeded)
+            cancelledByUserInteraction=\(cancelledByUserInteraction) errored=\(errored) \
+            fullscreenAttempts=\(fullscreenAttempts) fullscreenSucceeded=\(fullscreenSucceeded)\
+            \(accounted == entriesToConsider.count ? "" : "  !! UNACCOUNTED=\(entriesToConsider.count - accounted)")
             """)
 
         return RestoreReport(

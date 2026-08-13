@@ -48,6 +48,49 @@ public struct SpaceResolver: Sendable {
         return mapToPerDisplayIndex(spaceID: id, displayUUID: nil) ?? 0
     }
 
+    /// The active Space index, verified against the windows actually on screen,
+    /// retrying until the two agree.
+    ///
+    /// Restore needs this as much as capture does, and for the same reason: the
+    /// window server does not switch Spaces atomically. Capture filing itself
+    /// under the wrong Space overwrites a config; **restore** reading the wrong
+    /// index applies another Space's frames to the windows in front of you.
+    ///
+    /// Verification uses on-screen CG windows rather than AX — no Accessibility
+    /// round-trip, and `.isOnScreen` is by definition the active Space. Only
+    /// windows belonging to exactly one Space vote, so sticky "all Desktops"
+    /// windows cannot drag the answer (they otherwise all vote for Space 0).
+    ///
+    /// Returns the unverified index if the two never agree; the caller is
+    /// restoring, not writing, so acting on the best available answer beats
+    /// refusing. Disagreement is logged by the caller.
+    public func settledActiveSpaceIndex(
+        attempts: Int = 4,
+        delaySeconds: Double = 0.25,
+        onRetry: ((Int, Int) -> Void)? = nil
+    ) async -> Int {
+        var index = activeSpaceIndex()
+        for attempt in 1...max(1, attempts) {
+            let onScreen = CGWindowEnumerator.enumerateAllWindows()
+                .filter(\.isOnScreen)
+                .map(\.windowID)
+            var counts: [Int: Int] = [:]
+            for id in onScreen {
+                guard let i = unambiguousSpaceIndex(forWindowID: id) else { continue }
+                counts[i, default: 0] += 1
+            }
+            let observed = counts
+                .sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+                .first?.key
+            guard let observed, observed != index else { return index }
+            onRetry?(index, observed)
+            if attempt == max(1, attempts) { return index }
+            try? await Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+            index = activeSpaceIndex()
+        }
+        return index
+    }
+
     /// The Space index of a window that belongs to exactly one Space, or `nil`
     /// for sticky "all Desktops" windows and windows mid-teardown.
     ///

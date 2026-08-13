@@ -216,6 +216,10 @@ public final class AppLifecycle {
                     let activeSpace = spaceResolverRef.activeSpaceIndex()
                     guard let snapshot = try store.loadLatest(forConfigurationID: configID,
                                                               spaceIndex: activeSpace) else {
+                        DiagnosticLog.write("restore", """
+                            SKIP wake restore: no config for space=\(activeSpace) of \(configID) \
+                            — capture this Space once while you're on it.
+                            """)
                         logger.log(.info, "Wake trigger fired but no snapshot exists for config \(configID) space \(activeSpace)")
                         return
                     }
@@ -697,10 +701,26 @@ public final class AppLifecycle {
             }
             do {
                 let configID = displayEnumerator.configurationID()
-                let activeSpace = spaceResolver.activeSpaceIndex()
+                // Read the index ONCE, verified. This used to be read twice —
+                // here and again for `onlySpaceIndex` below — so a Space switch
+                // landing between the two loaded one Space's config and filtered
+                // it for another, considering zero entries.
+                let activeSpace = await spaceResolver.settledActiveSpaceIndex { reported, observed in
+                    DiagnosticLog.write("restore", """
+                        SETTLING manual restore: display says space \(reported) but on-screen \
+                        windows are on \(observed) — waiting for the Space switch to finish.
+                        """)
+                }
                 guard let snap = try snapshotStore.loadLatest(forConfigurationID: configID,
                                                               spaceIndex: activeSpace) else {
                     statusModel.lastError = "No snapshot for this Space (\(activeSpace + 1)) on the current display configuration. Capture first."
+                    // Diagnostic log, not just os_log: "restore did nothing" with
+                    // an empty diagnostic log is indistinguishable from a broken
+                    // restore, which cost a full debugging session on 2026-08-13.
+                    DiagnosticLog.write("restore", """
+                        SKIP manual restore: no config for space=\(activeSpace) \
+                        of \(configID) — capture this Space once while you're on it.
+                        """)
                     LoggerRegistry.app.log(.info, "Manual restore: no config for space \(activeSpace) of \(configID)")
                     return
                 }
@@ -713,7 +733,7 @@ public final class AppLifecycle {
                 // now = "fix the Space I'm looking at", nothing more. Automatic
                 // multi-Space restore happens only on a real wake.
                 let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
-                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID(), onlySpaceIndex: spaceResolver.activeSpaceIndex())
+                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID(), onlySpaceIndex: activeSpace)
                 statusModel.lastRestore = Date()
                 statusModel.lastRestoreMoved = report.moved
                 statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
@@ -913,15 +933,20 @@ public final class AppLifecycle {
             }
             do {
                 let configID = displayEnumerator.configurationID()
-                let pickerSpace = spaceResolver.activeSpaceIndex()
+                let pickerSpace = await spaceResolver.settledActiveSpaceIndex { reported, observed in
+                    DiagnosticLog.write("restore", """
+                        SETTLING slot restore: display says space \(reported) but on-screen \
+                        windows are on \(observed) — waiting for the Space switch to finish.
+                        """)
+                }
                 guard let snap = try snapshotStore.load(forConfigurationID: configID,
                                                         spaceIndex: pickerSpace,
                                                         slot: slot) else {
-                    statusModel.lastError = "Slot \(slot) is empty for this Space (\(pickerSpace + 1))."
+                    statusModel.lastError = "Slot \(slot) is empty for Space \(pickerSpace)."
                     return
                 }
                 let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
-                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID(), onlySpaceIndex: spaceResolver.activeSpaceIndex())
+                let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID(), onlySpaceIndex: pickerSpace)
                 statusModel.lastRestore = Date()
                 statusModel.lastRestoreMoved = report.moved
                 statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
