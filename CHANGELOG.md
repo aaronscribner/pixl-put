@@ -17,6 +17,28 @@ scripts/build-app.sh release    # rebuild that release's bundle
 tag in the same commit the tag points at, so a running build can always be
 traced back to a commit.
 
+## [1.0.3] — 2026-08-14
+
+### Fixed
+- **The diagnostic log deleted its own evidence.** It truncated on every app
+  launch, and installing a fix requires a launch — so the record of the run that
+  demonstrated a bug was routinely destroyed at the moment it was needed.
+  Diagnosing why a Teams window would not move needed window titles from the
+  previous run and they were already gone. The log now rotates: the current run
+  is `diagnostic.log`, the two before it are `diagnostic.1.log` and
+  `diagnostic.2.log`.
+
+### Known limitation (unchanged)
+Apps with no deep-identity provider and no title regex resolve to
+`.ordinal(N)` — a bare creation index. Those windows restore only while their
+CGWindowID survives **or** the number of windows the app has open is identical
+at capture and restore. `com.microsoft.teams2` is the clearest case: Teams
+recreates its windows, so the windowID join always fails, and a capture taken
+with two Teams windows will refuse to restore against one
+(`SKIP-ORDINAL-MISMATCH` — correct, since an ordinal cannot survive a count
+change). Affected bundles observed here: Teams, Finder, Outlook, Music, Spark,
+Messages, qBittorrent, TextEdit, Remote Desktop. Title regexes would fix them.
+
 ## [1.0.2] — 2026-08-13
 
 Restore-side counterpart to 1.0.1's capture fixes, plus diagnostics that answer

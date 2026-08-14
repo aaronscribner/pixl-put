@@ -3,8 +3,10 @@ import Foundation
 /// Plain-text diagnostic log written to a file under Application Support.
 /// Bypasses unified logging (whose `.info`/`.debug` levels are suppressed
 /// for third-party subsystems by default) so the user can read the trace
-/// with `tail -f` or `cat`. Process-scoped truncation: every app launch
-/// starts a new file so old runs don't accumulate.
+/// with `tail -f` or `cat`. Rotated per launch: the current run is
+/// `diagnostic.log`, the two runs before it are `diagnostic.1.log` and
+/// `diagnostic.2.log`, so installing a fix (which requires a relaunch) no longer
+/// deletes the evidence for the bug being fixed.
 ///
 /// Path: `~/Library/Application Support/DisplayMaid-Next/logs/diagnostic.log`
 public enum DiagnosticLog {
@@ -55,8 +57,28 @@ public enum DiagnosticLog {
             return nil
         }
         let file = dir.appendingPathComponent("diagnostic.log")
-        // Truncate at launch so each session starts fresh — easier for the
-        // user to share, no week-long accumulation.
+        // ROTATE at launch rather than truncate.
+        //
+        // Truncating meant every relaunch destroyed the record of the run before
+        // it — and installing a fix *requires* a relaunch, so the evidence for
+        // the bug being fixed was routinely deleted at the moment it was needed.
+        // Diagnosing why a Teams window would not move on 2026-08-14 needed the
+        // window titles from the previous run; they were already gone.
+        //
+        // `diagnostic.log` is still fresh per session (easy to read and share),
+        // with the two previous runs kept alongside it.
+        let keep = 2
+        try? fm.removeItem(at: dir.appendingPathComponent("diagnostic.\(keep).log"))
+        for n in stride(from: keep - 1, through: 1, by: -1) {
+            let src = dir.appendingPathComponent("diagnostic.\(n).log")
+            guard fm.fileExists(atPath: src.path) else { continue }
+            try? fm.removeItem(at: dir.appendingPathComponent("diagnostic.\(n + 1).log"))
+            try? fm.moveItem(at: src, to: dir.appendingPathComponent("diagnostic.\(n + 1).log"))
+        }
+        if fm.fileExists(atPath: file.path) {
+            try? fm.removeItem(at: dir.appendingPathComponent("diagnostic.1.log"))
+            try? fm.moveItem(at: file, to: dir.appendingPathComponent("diagnostic.1.log"))
+        }
         try? "".write(to: file, atomically: true, encoding: .utf8)
         guard let handle = try? FileHandle(forWritingTo: file) else { return nil }
         try? handle.seekToEnd()
