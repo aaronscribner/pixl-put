@@ -17,6 +17,24 @@ scripts/build-app.sh release    # rebuild that release's bundle
 tag in the same commit the tag points at, so a running build can always be
 traced back to a commit.
 
+## [Unreleased]
+
+### Added
+- PixPut enumerates windows on every Space itself, without yabai. `NativeWindowQuery` joins `CGWindowListCopyWindowInfo` (which already returns windows on inactive Spaces) with `CGSCopySpacesForWindows`, and maps Space IDs to indices through the managed Space list. The restore plan can now be built with yabai absent, stopped, or broken, and it is correct on the spanning-display configuration (ADR-0003). yabai is the fallback, and remains the actuator: moving another process's window between Spaces requires running inside Dock, which only yabai's scripting addition does. Measured 2026-09-12 — the window server refuses every cross-connection mutation: `SLSMoveWindowsToManagedSpace` silently no-ops, `SLSSpaceAddWindowsAndRemoveFromSpaces` errors, `SLSSetWindowTags` reports success and changes nothing.
+- Two fixes in the vendored yabai fork so it works at all with "Displays have separate Spaces" off, which is the configuration PixPut requires. `SLSCopyManagedDisplaySpaces` keys entries by display UUID only when that setting is on; with it off the window server returns one entry identified as `Main`, so yabai's UUID match found nothing and `display_space_list` returned null for every display. That propagated silently — no views, no tracked windows, and every window command failing with "could not locate the window to act on", while queries still looked healthy because they fall back to a non-Accessibility serializer. The spanning entry is now attributed to the main display, and the startup guard that aborted in this mode is a warning. Verified on macOS 26.2: 52 of 68 windows Accessibility-tracked, and per-window `--space` moves working.
+- Restore after a restart: when PixlPut launches within 15 minutes of a reboot it arms the Space-switch restore gate, waits for the login storm of relaunching apps to settle, runs the full cross-Space restore, and repeats it as late apps appear. Setting: Behavior → "Restore after a restart" (default on).
+- Cross-Space restore plans every Space in one pass from yabai's window query instead of the active Space AX can see. Space moves and frames on other Spaces go through yabai; the active Space keeps the verified AX frame pass.
+- Finder windows get a folder-path identity over AppleScript (they were ordinal-only, so unmatchable after any restart). Browsers report their active tab by title for windows on other Spaces.
+- yabai is vendored as a git submodule (`vendor/yabai`, our fork of asmvik/yabai at github.com/aaronscribner/yabai, identifier `co.cerebraljuice.yabai`). `scripts/build-yabai.sh` builds it, signs it with the app's Developer ID so the Accessibility grant survives rebuilds, and installs it as `/Applications/Utilities/yabai.app` (a bundle, not a bare binary: TCC will not record an Accessibility decision for a Mach-O it cannot attribute to a bundle, so a bare yabai can never appear in System Settings); `build-app.sh` runs it (`SKIP_YABAI=1` to skip). PixPut looks for yabai there first.
+- `scripts/setup-yabai.sh`: sudoers rule for `--load-sa`, floating layout, launch agent pointed at the installed binary.
+
+### Changed
+- "Restore windows to their Spaces" refuses, with instructions, when yabai is installed but not answering (after trying to start it) instead of silently downgrading to per-app moves. A run that moves nothing now always says why in the menu.
+- Per-window matching keys on bundle + deep identity; creation ordinals only break ties. Ordinals are renumbered on every app restart, so after a reboot nothing matched.
+
+### Fixed
+- Space assignment verification probed only an app's first CG window; for several apps that is an off-screen helper with no Space, so every restore reported "did not take effect" for them. Verification now judges all windows and ignores those reporting zero or many Spaces. Apps already on their Space are no longer given a sticky assignment.
+
 ## [1.0.3] — 2026-08-14
 
 ### Fixed

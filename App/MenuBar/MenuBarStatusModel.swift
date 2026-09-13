@@ -32,6 +32,17 @@ public final class MenuBarStatusModel: ObservableObject {
         }
     }
     private static let autoRestoreKey = "PixlPut.autoRestoreOnWake"
+    /// User setting: when true and PixlPut is launched within minutes of a
+    /// reboot, it waits for the login storm of relaunching apps to settle,
+    /// then runs the full cross-Space restore, and repeats it as late apps
+    /// finish launching. Only a fresh boot triggers this — an ordinary
+    /// relaunch of PixlPut still moves nothing. Persisted; default true.
+    @Published public var restoreAfterRestart: Bool {
+        didSet {
+            UserDefaults.standard.set(restoreAfterRestart, forKey: Self.restoreAfterRestartKey)
+        }
+    }
+    private static let restoreAfterRestartKey = "PixlPut.restoreAfterRestart"
     /// When true, PixlPut captures a JPEG screenshot of the active display
     /// every time a Space-switch auto-capture fires. Disabled by default —
     /// requires explicit consent (the user must acknowledge that
@@ -66,6 +77,7 @@ public final class MenuBarStatusModel: ObservableObject {
     public init() {
         // Default ON when the user has never set it.
         self.restoreOnSpaceSwitch = UserDefaults.standard.object(forKey: Self.autoRestoreKey) as? Bool ?? true
+        self.restoreAfterRestart = UserDefaults.standard.object(forKey: Self.restoreAfterRestartKey) as? Bool ?? true
         self.enableSpaceScreenshots = UserDefaults.standard.bool(forKey: Self.enableSpaceScreenshotsKey)
         self.enableSnapshotHistoryThumbnails = UserDefaults.standard.bool(forKey: Self.enableHistoryThumbnailsKey)
     }

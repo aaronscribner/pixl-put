@@ -184,11 +184,12 @@ public enum SpaceAssignmentPlanner {
         }
     }
 
-    /// Space-independent match key: bundle + identity + ordinal. Deliberately
-    /// excludes `spaceIndex` — the entire point is to match a window
-    /// regardless of which Space it currently sits on.
-    static func matchKey(bundleID: String, identity: WindowIdentity, ordinalInApp: Int) -> String {
-        "\(bundleID)|\(identity)|\(ordinalInApp)"
+    /// Space-independent match key: bundle + identity. Deliberately excludes
+    /// `spaceIndex` — the entire point is to match a window regardless of
+    /// which Space it currently sits on — and excludes the creation ordinal,
+    /// which is only consulted to break a tie (see `perWindowMoves`).
+    static func matchKey(bundleID: String, identity: WindowIdentity) -> String {
+        "\(bundleID)|\(identity)"
     }
 
     /// Pair snapshot entries with live windows and emit one move per window
@@ -199,6 +200,14 @@ public enum SpaceAssignmentPlanner {
     /// windows of the *same* app are told apart and can be sent to different
     /// Spaces — which the per-app backend fundamentally cannot express.
     ///
+    /// Identity alone decides when every captured window with that identity
+    /// sat on one Space. The creation ordinal is consulted only when the same
+    /// identity was captured on several Spaces, and then only an exact
+    /// ordinal match with a single target counts. Ordinals are **not** part
+    /// of the primary key: they are renumbered whenever an app restarts, so
+    /// after a reboot every deep-identity window would otherwise fail to
+    /// match and the restore would silently move nothing.
+    ///
     /// Windows identified only by `.ordinal` are skipped: creation ordinals
     /// shift across app restarts, and relocating a window on that guess moves
     /// the wrong one. Windows with no `windowID` are skipped because there is
@@ -207,35 +216,75 @@ public enum SpaceAssignmentPlanner {
         snapshot: [WindowEntry],
         live: [LiveWindow]
     ) -> [WindowMove] {
-        var targetByKey: [String: Int] = [:]
-        var ambiguous: Set<String> = []
+        perWindowMatches(snapshot: snapshot, live: live).map { match in
+            WindowMove(windowID: match.windowID,
+                       targetSpaceIndex: match.entry.spaceIndex,
+                       bundleID: match.live.bundleID)
+        }
+    }
+
+    /// A live window paired with the captured entry that describes where it
+    /// belongs — Space *and* frame. `perWindowMoves` is the Space-only
+    /// projection; the cross-Space restore uses the full pair so it can put
+    /// frames right on Spaces AX cannot see.
+    public struct WindowMatch: Equatable, Sendable {
+        public let windowID: CGWindowID
+        public let live: LiveWindow
+        public let entry: WindowEntry
+        public init(windowID: CGWindowID, live: LiveWindow, entry: WindowEntry) {
+            self.windowID = windowID
+            self.live = live
+            self.entry = entry
+        }
+    }
+
+    /// Pair live windows with captured entries by bundle + deep identity.
+    ///
+    /// When one identity was captured once, that entry wins regardless of
+    /// ordinal. When it was captured several times (same identity on several
+    /// Spaces, or two windows of one workspace), an exact ordinal match with
+    /// a single candidate decides; anything else is left alone. Each entry
+    /// is consumed at most once.
+    public static func perWindowMatches(
+        snapshot: [WindowEntry],
+        live: [LiveWindow]
+    ) -> [WindowMatch] {
+        var entriesByKey: [String: [WindowEntry]] = [:]
         for entry in snapshot {
             if case .ordinal = entry.identity { continue }
-            let key = matchKey(bundleID: entry.bundleID,
-                               identity: entry.identity,
-                               ordinalInApp: entry.ordinalInApp)
-            if let existing = targetByKey[key], existing != entry.spaceIndex {
-                // Same key captured on two Spaces — unresolvable, so touch neither.
-                ambiguous.insert(key)
-            } else {
-                targetByKey[key] = entry.spaceIndex
-            }
+            entriesByKey[matchKey(bundleID: entry.bundleID, identity: entry.identity), default: []]
+                .append(entry)
         }
-        for key in ambiguous { targetByKey.removeValue(forKey: key) }
 
-        var moves: [WindowMove] = []
-        for window in live {
+        var consumed: Set<WindowEntry> = []
+        var matches: [WindowMatch] = []
+        // Deterministic live order so runs are reproducible and diffable.
+        let orderedLive = live.sorted { ($0.bundleID, $0.windowID ?? 0) < ($1.bundleID, $1.windowID ?? 0) }
+        for window in orderedLive {
             if case .ordinal = window.identity { continue }
             guard let windowID = window.windowID else { continue }
-            let key = matchKey(bundleID: window.bundleID,
-                               identity: window.identity,
-                               ordinalInApp: window.ordinalInApp)
-            guard let target = targetByKey[key] else { continue }
-            moves.append(WindowMove(windowID: windowID,
-                                    targetSpaceIndex: target,
-                                    bundleID: window.bundleID))
+            let key = matchKey(bundleID: window.bundleID, identity: window.identity)
+            guard let candidates = entriesByKey[key] else { continue }
+
+            let chosen: WindowEntry?
+            let distinctSpaces = Set(candidates.map(\.spaceIndex))
+            if candidates.count == 1 {
+                chosen = candidates[0]
+            } else if distinctSpaces.count == 1 {
+                // Several windows of one identity, all on one Space (two
+                // VS Code windows of the same workspace): any unconsumed
+                // entry places this window correctly.
+                chosen = candidates.first { !consumed.contains($0) }
+            } else {
+                // Same identity on several Spaces: the ordinal is the only
+                // thing left that tells the windows apart.
+                let byOrdinal = candidates.filter { $0.ordinalInApp == window.ordinalInApp }
+                chosen = Set(byOrdinal.map(\.spaceIndex)).count == 1 ? byOrdinal.first : nil
+            }
+            guard let entry = chosen, !consumed.contains(entry) else { continue }
+            consumed.insert(entry)
+            matches.append(WindowMatch(windowID: windowID, live: window, entry: entry))
         }
-        // Deterministic order so runs are reproducible and diffable.
-        return moves.sorted { ($0.bundleID, $0.windowID) < ($1.bundleID, $1.windowID) }
+        return matches
     }
 }

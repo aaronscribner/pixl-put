@@ -96,6 +96,12 @@ private struct GeneralPane: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                Toggle("Restore after a restart",
+                       isOn: $statusModel.restoreAfterRestart)
+                Text("When ON and PixlPut starts within 15 minutes of a reboot, it waits for your apps to finish relaunching, then puts every window back on its captured Space and frame, and repeats for apps that appear later. Needs yabai running for per-window moves (scripts/setup-yabai.sh). An ordinary relaunch of PixlPut never moves windows.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Section("Snapshot history") {
                 HistoryLimitControl()

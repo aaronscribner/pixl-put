@@ -300,10 +300,32 @@ public final class AppLifecycle {
         // windows — restore only happens on a real sleep/wake (while the app
         // is running) or when the user explicitly clicks Restore now.
 
+        // A launch within minutes of a reboot is the one launch that IS a
+        // wake: every app was just relaunched and its windows landed wherever
+        // macOS put them. Arm the Space-switch restore gate so the first
+        // visit to each Space restores it, exactly as after sleep. Measured
+        // 2026-09-10: without this the first post-boot Space visit logged
+        // "already visited since last wake (gate closed)" and nothing moved.
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let freshBoot = BootDetection.isFreshBoot(uptime: uptime)
+        if freshBoot {
+            eventLog.recordWake()
+            DiagnosticLog.write("startup",
+                "fresh boot (uptime \(Int(uptime))s): Space-switch restore gate armed")
+        }
+
         // Seed EventLog with the Space active at launch so it isn't later
-        // treated as "unvisited since wake".
+        // treated as "unvisited since wake". On a fresh boot the active Space
+        // is covered by restore-after-restart below.
         let initialSpace = spaceResolver.activeSpaceIndex()
         eventLog.recordSpaceVisit(spaceIndex: initialSpace)
+
+        if freshBoot && statusModel.restoreAfterRestart {
+            DiagnosticLog.write("startup", "fresh boot: restore-after-restart scheduled")
+            scheduleRestoreAfterRestart()
+        } else if freshBoot {
+            DiagnosticLog.write("startup", "fresh boot: restore-after-restart disabled by setting")
+        }
 
         // Licensing: start the validator. It refreshes local state from
         // Keychain, kicks off a /validate phone-home if a license is
@@ -768,157 +790,478 @@ public final class AppLifecycle {
     /// The relocation mechanism is process-scoped: an app whose windows were
     /// captured on several Spaces cannot be fully reproduced, and those windows
     /// are reported as displaced rather than silently mis-placed.
+    /// Why a cross-Space restore is running. Decides which licence gate
+    /// applies and how the outcome is worded.
+    public enum RestoreSpacesTrigger: String, Sendable {
+        case manual
+        case afterRestart
+    }
+
     public func restoreSpaces() {
         Task { @MainActor in
-            guard allowsManualFeatures else {
-                statusModel.lastError = "License required. Open menu bar → License… to activate or start a trial."
-                DiagnosticLog.write("restore-spaces", "BLOCKED: license state = \(licenseValidator.state)")
+            await self.performRestoreSpaces(trigger: .manual)
+        }
+    }
+
+    /// The full cross-Space restore (ADR-0002). Returns `false` when it was
+    /// refused before touching anything; `true` when it ran, whether or not
+    /// anything needed moving. The outcome is always written to
+    /// `statusModel.lastError` when nothing moved, so a click that "did
+    /// nothing" can always explain itself.
+    @discardableResult
+    func performRestoreSpaces(trigger: RestoreSpacesTrigger) async -> Bool {
+        let licensed = trigger == .manual ? allowsManualFeatures : allowsAutoFeatures
+        guard licensed else {
+            statusModel.lastError = "License required. Open menu bar → License… to activate or start a trial."
+            DiagnosticLog.write("restore-spaces", "BLOCKED: license state = \(licenseValidator.state)")
+            return false
+        }
+        guard spaceResolver.canRelocateAcrossSpaces else {
+            statusModel.lastError = "This macOS doesn't expose the Space-relocation API. "
+                + "Windows can still be restored to their display and frame via Restore now."
+            LoggerRegistry.app.log(.info, "Restore Spaces unavailable: CGSProcessAssignToSpace missing")
+            return false
+        }
+        // ADR-0003: this project targets one display configuration. With
+        // several managed Space sets a stored Space index doesn't identify
+        // which display it came from, and a guess scatters windows onto a
+        // Space the user never picked. Refuse, and say why.
+        guard spaceResolver.hasSupportedSpaceConfiguration else {
+            statusModel.lastError = "Restoring Spaces needs Spaces that span your displays. "
+                + "Turn off System Settings → Desktop & Dock → \"Displays have separate Spaces\", "
+                + "or use Restore now, which is unaffected."
+            DiagnosticLog.write("restore-spaces", "REFUSED: multiple managed Space sets (ADR-0003)")
+            LoggerRegistry.app.log(.info, "Restore Spaces refused: unsupported display/Spaces configuration")
+            return false
+        }
+
+        let configID = displayEnumerator.configurationID()
+        // Relocation planning is the one operation that genuinely needs
+        // every Space at once — it decides, per window or per app, which
+        // Space to send it to. So union each Space's config into one working
+        // snapshot. Every other path reads a single Space.
+        let knownSpaces = snapshotStore.spaceIndices(forConfigurationID: configID)
+        var unioned: [WindowEntry] = []
+        var newestCapture: Date?
+        var unionDisplays: [DisplaySnapshot] = []
+        for index in knownSpaces {
+            guard let s = try? snapshotStore.loadLatest(forConfigurationID: configID,
+                                                        spaceIndex: index) else { continue }
+            unioned.append(contentsOf: s.windows)
+            if newestCapture == nil || s.capturedAt > newestCapture! {
+                newestCapture = s.capturedAt
+                unionDisplays = s.displays
+            }
+        }
+        guard !unioned.isEmpty, let capturedAt = newestCapture else {
+            statusModel.lastError = "No Space configs exist for the current display configuration (\(configID)). Capture first."
+            DiagnosticLog.write("restore-spaces", "\(trigger.rawValue): no Space configs for \(configID)")
+            return false
+        }
+        let snap = Snapshot(
+            displayConfigurationID: configID,
+            displays: unionDisplays,
+            capturedAt: capturedAt,
+            trigger: .manual,
+            windows: unioned
+        )
+        LoggerRegistry.app.log(.info,
+            "Restore Spaces (\(trigger.rawValue)): unioned \(unioned.count) window(s) from space configs \(knownSpaces)")
+        DiagnosticLog.write("restore-spaces",
+            "\(trigger.rawValue): begin — \(unioned.count) captured window(s) across Spaces \(knownSpaces)")
+
+        // Backend. yabai (per-window) when it answers. When yabai is
+        // installed but silent — the state every reboot leaves it in unless
+        // its launch agent is installed — try to start it, and refuse rather
+        // than downgrade if that fails: the per-app backend deliberately
+        // leaves every app whose windows span Spaces where it is, which for
+        // this user's layout is a restore that does nothing.
+        let selection = SpaceRelocationBackendFactory.select()
+        var backend = selection.backend
+        if !backend.supportsPerWindowMoves, let yabai = YabaiRelocationBackend.locate() {
+            DiagnosticLog.write("restore-spaces", "yabai installed but not answering; starting its service")
+            if yabai.startService() {
+                backend = yabai
+                DiagnosticLog.write("restore-spaces", "yabai service started")
+            } else {
+                statusModel.lastError = "yabai is installed but not running, and PixlPut couldn't start it. "
+                    + "Restore Spaces needs it to move windows one at a time. "
+                    + "Run scripts/setup-yabai.sh, and approve yabai under Privacy & Security → Accessibility."
+                DiagnosticLog.write("restore-spaces", "REFUSED: yabai installed but not answering after --start-service")
+                return false
+            }
+        }
+        DiagnosticLog.write("restore-spaces", "backend=\(backend.name)")
+
+        do {
+            if let yabai = backend as? YabaiRelocationBackend {
+                try await crossSpaceRestore(yabai: yabai, snapshot: snap, trigger: trigger)
+            } else {
+                try await perAppRestore(backend: backend, snapshot: snap)
+            }
+            return true
+        } catch {
+            let msg = Self.describe(error: error, operation: "restore Spaces")
+            statusModel.lastError = msg
+            LoggerRegistry.app.log(.error, "Restore Spaces failed: \(error)")
+            DiagnosticLog.write("restore-spaces", "FAILED: \(error)")
+            return false
+        }
+    }
+
+    /// Per-window restore over every Space at once.
+    ///
+    /// yabai's window query is the only enumeration that covers Spaces AX
+    /// cannot see; AX supplies exact identities for the active Space, and
+    /// AppleScript supplies documents-by-title for the rest. Spaces and
+    /// frames on non-active Spaces are set through yabai; the active Space's
+    /// frames go through the verified AX pass as always.
+    private func crossSpaceRestore(
+        yabai: YabaiRelocationBackend,
+        snapshot snap: Snapshot,
+        trigger: RestoreSpacesTrigger
+    ) async throws {
+        let bundleIDByPID: [pid_t: String] = Dictionary(
+            NSWorkspace.shared.runningApplications.compactMap { app -> (pid_t, String)? in
+                app.bundleIdentifier.map { (app.processIdentifier, $0) }
+            },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        // Active-Space identities from AX: exact, and the same pipeline that
+        // wrote the snapshot.
+        let axLive = (try? await restorerBackend.enumerateLiveWindows()) ?? []
+        let axByWindowID: [CGWindowID: LiveWindow] = Dictionary(
+            axLive.compactMap { w in w.windowID.map { ($0, w) } },
+            uniquingKeysWith: { first, _ in first }
+        )
+
+        // PixPut's own every-Space enumeration is authoritative. It needs no
+        // helper process, so the plan can still be built when yabai is
+        // absent or stopped, and it is correct on the spanning-display
+        // configuration (ADR-0003) that yabai historically mis-read. yabai
+        // stays the fallback, and remains the actuator either way: only it
+        // can move another process's window between Spaces.
+        //
+        // Titles are left to CrossSpaceWindowIndex, which already resolves
+        // identity from AX for the active Space and AppleScript documents for
+        // the rest — a better source than any title CoreGraphics could give.
+        let source: String
+        let yabaiWindows: [YabaiWindow]
+        if let native = NativeWindowQuery.windows(), !native.isEmpty {
+            yabaiWindows = native
+            source = "native"
+        } else if let fromYabai = yabai.queryWindows() {
+            yabaiWindows = fromYabai
+            source = "yabai"
+        } else {
+            statusModel.lastError = "The window query failed, from both PixPut and yabai. Nothing was moved."
+            DiagnosticLog.write("restore-spaces", "window query failed (native and yabai)")
+            return
+        }
+
+        // Documents by title for other Spaces — browsers' active tab, Finder's
+        // folder. Gated like every other AppleScript use.
+        var documentsByTitle: [String: [String: URL]] = [:]
+        if statusModel.deepIdentityEnabled {
+            let bundles = Set(yabaiWindows.compactMap { bundleIDByPID[$0.pid] })
+                .filter { DeepIdentityFetcher.reportsDocumentsByTitle(bundleID: $0) }
+            for bundleID in bundles.sorted() {
+                if let docs = await restorerBackend.deepIdentityFetcher.documentsByTitle(bundleID: bundleID) {
+                    documentsByTitle[bundleID] = docs
+                }
+            }
+        }
+
+        let currentBounds = currentDisplayBoundsByID()
+        let index = CrossSpaceWindowIndex.build(
+            yabaiWindows: yabaiWindows,
+            bundleIDByPID: bundleIDByPID,
+            axLiveByWindowID: axByWindowID,
+            documentsByTitle: documentsByTitle,
+            displayBoundsByID: currentBounds
+        )
+        let spaceByWindowID: [CGWindowID: Int] = Dictionary(
+            index.compactMap { w in w.live.windowID.map { ($0, w.spaceIndex) } },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let matches = SpaceAssignmentPlanner.perWindowMatches(snapshot: snap.windows,
+                                                              live: index.map(\.live))
+        DiagnosticLog.write("restore-spaces", """
+            cross-Space index: source=\(source) windows=\(yabaiWindows.count) placeable=\(index.count) \
+            ax=\(axLive.count) scriptedApps=\(documentsByTitle.count) matched=\(matches.count) \
+            captured=\(snap.windows.count)
+            """)
+
+        // Unmatched live windows, by app, so "why didn't X move" is answerable.
+        let matchedIDs = Set(matches.map(\.windowID))
+        let unmatched = index.filter { w in w.live.windowID.map { !matchedIDs.contains($0) } ?? true }
+        for app in Dictionary(grouping: unmatched, by: { $0.live.bundleID }).sorted(by: { $0.key < $1.key }) {
+            let kinds = Set(app.value.map { identityKind($0.live.identity) }).sorted().joined(separator: ",")
+            DiagnosticLog.write("restore-spaces",
+                "unmatched: \(app.key) \(app.value.count) window(s) [identity: \(kinds)]")
+        }
+
+        // 1. Space moves — verified by re-reading each window's Space.
+        let moves = matches
+            .filter { spaceByWindowID[$0.windowID] != $0.entry.spaceIndex }
+            .map { SpaceAssignmentPlanner.WindowMove(windowID: $0.windowID,
+                                                     targetSpaceIndex: $0.entry.spaceIndex,
+                                                     bundleID: $0.live.bundleID) }
+        let assigner = SpaceAssigner(backend: yabai)
+        let unlanded = assigner.applyPerWindow(moves)
+        let movedCount = moves.count - unlanded.count
+        let alreadyThere = matches.count - moves.count
+        var scriptingAdditionProblem: String?
+        if let first = unlanded.first,
+           let diag = yabai.moveDiagnostic(windowID: first.windowID, toSpaceIndex: first.targetSpaceIndex) {
+            DiagnosticLog.write("restore-spaces", "yabai --space failed: \(diag)")
+            if diag.localizedCaseInsensitiveContains("scripting") || diag.localizedCaseInsensitiveContains("addition") {
+                scriptingAdditionProblem = diag
+            }
+        }
+        for move in unlanded {
+            DiagnosticLog.write("restore-spaces",
+                "\(move.bundleID) window \(move.windowID) -> space \(move.targetSpaceIndex): did not land")
+        }
+        for m in matches where !unlanded.contains(where: { $0.windowID == m.windowID }) {
+            DiagnosticLog.write("restore-spaces",
+                "\(m.live.bundleID) window \(m.windowID) -> space \(m.entry.spaceIndex): "
+                + (spaceByWindowID[m.windowID] == m.entry.spaceIndex ? "already there" : "moved"))
+        }
+
+        // Relocation is asynchronous in the window server; give it a beat
+        // before frames are read or set.
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        // 2. Frames on Spaces AX cannot reach, through yabai. Re-anchor by
+        // display origin exactly as Restorer does.
+        let savedBounds: [String: CGRectCodable] = Dictionary(
+            snap.displays.map { ($0.fingerprint.id, $0.bounds) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        func reanchored(_ entry: WindowEntry) -> CGRectCodable {
+            guard let saved = savedBounds[entry.displayFingerprintID],
+                  let current = currentBounds[entry.displayFingerprintID] else { return entry.frame }
+            let dx = current.x - saved.x, dy = current.y - saved.y
+            if dx == 0 && dy == 0 { return entry.frame }
+            return CGRectCodable(x: entry.frame.x + dx, y: entry.frame.y + dy,
+                                 width: entry.frame.width, height: entry.frame.height)
+        }
+        let activeSpace = spaceResolver.activeSpaceIndex()
+        var framed = 0
+        var frameFailed = 0
+        for m in matches where m.entry.spaceIndex != activeSpace
+            && !unlanded.contains(where: { $0.windowID == m.windowID })
+            && !m.entry.isMinimized {
+            let target = reanchored(m.entry)
+            if Self.framesEqual(m.live.currentFrame, target, tolerance: 1.0) { continue }
+            if yabai.setFrame(windowID: m.windowID, frame: target) {
+                framed += 1
+            } else {
+                frameFailed += 1
+                DiagnosticLog.write("restore-spaces",
+                    "\(m.live.bundleID) window \(m.windowID): frame set failed on space \(m.entry.spaceIndex)")
+            }
+        }
+
+        // 3. The active Space's frames via the verified AX pass.
+        let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
+        let report = try await restorer.apply(
+            snap,
+            activeDisplayFingerprintIDs: activeIDs,
+            currentDisplayBoundsByID: currentBounds,
+            onlySpaceIndex: activeSpace,
+            movePolicy: trigger == .afterRestart ? .settling : .fast
+        )
+
+        statusModel.lastRestore = Date()
+        statusModel.lastRestoreMoved = report.moved + movedCount + framed
+        statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
+        statusModel.lastRestoreDisplaced = report.displacedNoMatchingDisplay
+
+        var notes: [String] = []
+        if movedCount == 0 && framed == 0 && report.moved == 0 {
+            notes.append("Nothing moved: \(alreadyThere) window(s) already on their captured Space"
+                + (matches.count == 0 ? "; no live window matched a captured entry" : "") + ".")
+        }
+        if !unlanded.isEmpty {
+            notes.append("\(unlanded.count) window(s) couldn't change Space."
+                + (scriptingAdditionProblem != nil
+                   ? " yabai's scripting addition isn't loaded — run scripts/setup-yabai.sh."
+                   : " See the diagnostic log."))
+        }
+        if frameFailed > 0 { notes.append("\(frameFailed) frame(s) couldn't be set on other Spaces.") }
+        if !unmatched.isEmpty {
+            let apps = Dictionary(grouping: unmatched, by: { $0.live.bundleID }).keys.sorted()
+                .map { $0.components(separatedBy: ".").last ?? $0 }.prefix(5).joined(separator: ", ")
+            notes.append("\(unmatched.count) window(s) had no captured match (\(apps)"
+                + (unmatched.count > 5 ? ", …" : "") + ")"
+                + (statusModel.deepIdentityEnabled ? "." : "; turn on deep identity in Settings to match browser and Finder windows on other Spaces."))
+        }
+        statusModel.lastError = notes.isEmpty ? nil : notes.joined(separator: " ")
+
+        DiagnosticLog.write("restore-spaces", """
+            done (\(trigger.rawValue)): backend=\(yabai.name) spaceMoves=\(movedCount) alreadyThere=\(alreadyThere) \
+            unlanded=\(unlanded.count) framesViaYabai=\(framed) frameFailed=\(frameFailed) \
+            axFramesMoved=\(report.moved) unmatched=\(unmatched.count)
+            """)
+        LoggerRegistry.app.log(.info,
+            "Restore Spaces via \(yabai.name): moved=\(movedCount) framed=\(framed) axMoved=\(report.moved) unmatched=\(unmatched.count)")
+    }
+
+    /// Per-app restore — the path for machines without yabai. Process-scoped
+    /// moves, so apps whose windows span Spaces are left alone (ADR-0002).
+    private func perAppRestore(backend: SpaceRelocationBackend, snapshot snap: Snapshot) async throws {
+        let assigner = SpaceAssigner(backend: backend)
+        var notes: [String] = []
+
+        let plan = SpaceAssignmentPlanner.plan(for: snap.windows)
+        let outcomes = assigner.apply(plan)
+        let failed = outcomes.filter { !$0.applied }
+        let alreadyInPlaceCount = outcomes.filter { $0.applied && $0.alreadyOnTarget }.count
+        let relocatedCount = outcomes.count - failed.count - alreadyInPlaceCount
+        let failedCount = failed.count
+        let leftAloneCount = plan.unrestorable.count
+
+        for outcome in outcomes where outcome.applied {
+            DiagnosticLog.write("restore-spaces",
+                "\(outcome.bundleID) -> space \(outcome.targetSpaceIndex): "
+                + (outcome.alreadyOnTarget ? "already there, not assigned" : "moved"))
+        }
+        for outcome in failed {
+            DiagnosticLog.write("restore-spaces",
+                "\(outcome.bundleID) -> space \(outcome.targetSpaceIndex): \(outcome.failureReason ?? "unknown")")
+        }
+        // Apps the do-no-harm guard skipped. Logged individually so the skip
+        // is auditable — silently omitting them would read as "PixPut
+        // ignored my windows".
+        for skipped in plan.unrestorable {
+            DiagnosticLog.write("restore-spaces",
+                "\(skipped.bundleID): LEFT ALONE — \(skipped.windowCount) window(s) across "
+                + "\(skipped.spaceCount) Spaces; best target would place "
+                + "\(skipped.bestCaseSatisfied) and misplace \(skipped.bestCaseDisplaced)")
+        }
+        if !plan.unrestorable.isEmpty {
+            let apps = plan.unrestorable.map(\.bundleID).joined(separator: ", ")
+            notes.append("\(plan.totalLeftAlone) window(s) left where they are: "
+                + "\(apps) had windows spread across Spaces, and macOS moves an app's "
+                + "windows together — collapsing them onto one Space would misplace more "
+                + "than it fixes. Install yabai (scripts/setup-yabai.sh) for per-window moves.")
+        }
+        if plan.totalDisplaced > 0 {
+            let apps = plan.partial.map(\.bundleID).joined(separator: ", ")
+            notes.append("\(plan.totalDisplaced) window(s) couldn't be placed: "
+                + "\(apps) had windows on more than one Space, and macOS moves an app's "
+                + "windows together.")
+        }
+        if failedCount > 0 {
+            notes.append("\(failedCount) app(s) couldn't be relocated — see Settings → Snapshots.")
+        }
+        if relocatedCount == 0 {
+            let summary: String
+            if alreadyInPlaceCount > 0 && failedCount == 0 && leftAloneCount == 0 {
+                summary = "Nothing to move: all \(alreadyInPlaceCount) app(s) were already on their captured Spaces."
+            } else if alreadyInPlaceCount > 0 {
+                summary = "No apps moved; \(alreadyInPlaceCount) were already on their captured Spaces."
+            } else {
+                summary = "No apps moved."
+            }
+            notes.insert(summary, at: 0)
+        }
+        DiagnosticLog.write("restore-spaces", """
+            done: backend=\(backend.name) relocated=\(relocatedCount) \
+            alreadyInPlace=\(alreadyInPlaceCount) failed=\(failedCount) leftAlone=\(leftAloneCount)
+            """)
+
+        // Relocation is asynchronous in the window server; give it a beat
+        // before AX starts reading frames.
+        try? await Task.sleep(nanoseconds: 250_000_000)
+
+        let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
+        let report = try await restorer.apply(
+            snap,
+            activeDisplayFingerprintIDs: activeIDs,
+            currentDisplayBoundsByID: currentDisplayBoundsByID(),
+            onlySpaceIndex: nil            // every Space, not just the active one
+        )
+        statusModel.lastRestore = Date()
+        statusModel.lastRestoreMoved = report.moved
+        statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
+        statusModel.lastRestoreDisplaced = report.displacedNoMatchingDisplay
+        statusModel.lastError = notes.isEmpty ? nil : notes.joined(separator: " ")
+        LoggerRegistry.app.log(.info,
+            "Restore Spaces via \(backend.name): relocated=\(relocatedCount) "
+            + "failed=\(failedCount) frames moved=\(report.moved)")
+    }
+
+    private static func framesEqual(_ a: CGRectCodable, _ b: CGRectCodable, tolerance: Double) -> Bool {
+        abs(a.x - b.x) <= tolerance && abs(a.y - b.y) <= tolerance
+            && abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
+    }
+
+    private func identityKind(_ identity: WindowIdentity) -> String {
+        switch identity {
+        case .documentPath: return "document"
+        case .browserTabSet: return "tabs"
+        case .editorWorkspace: return "workspace"
+        case .terminalCWD: return "cwd"
+        case .titleRegex: return "title"
+        case .ordinal: return "ordinal-only"
+        }
+    }
+
+    // MARK: - Restore after restart
+
+    /// Wait out the login storm, then run the cross-Space restore, and keep
+    /// re-running it while late-launching apps keep appearing. Only ever
+    /// scheduled when the app was launched within minutes of a reboot.
+    private func scheduleRestoreAfterRestart() {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Settle: sample the CG window population every 5s; settled after
+            // four equal samples (20s of no change). Hard cap 5 minutes.
+            var tracker = SettleTracker(requiredStableSamples: 4)
+            let start = Date()
+            let settleDeadline = start.addingTimeInterval(5 * 60)
+            while !tracker.isSettled && Date() < settleDeadline {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                if isScreenLockedNow() { continue }
+                tracker.record(CGWindowEnumerator.enumerateAllWindows().count)
+            }
+            // Don't move windows the user can't see; wait for unlock.
+            let unlockDeadline = Date().addingTimeInterval(10 * 60)
+            while isScreenLockedNow() && Date() < unlockDeadline {
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+            guard !isScreenLockedNow() else {
+                DiagnosticLog.write("restore-spaces", "afterRestart: still locked after 10 minutes, giving up")
                 return
             }
-            guard spaceResolver.canRelocateAcrossSpaces else {
-                statusModel.lastError = "This macOS doesn't expose the Space-relocation API. "
-                    + "Windows can still be restored to their display and frame via Restore now."
-                LoggerRegistry.app.log(.info, "Restore Spaces unavailable: CGSProcessAssignToSpace missing")
-                return
+            DiagnosticLog.write("restore-spaces", """
+                afterRestart: window population \(tracker.isSettled ? "settled" : "did not settle") \
+                after \(Int(Date().timeIntervalSince(start)))s at \(tracker.latest ?? -1) window(s)
+                """)
+            let ran = await self.performRestoreSpaces(trigger: .afterRestart)
+            guard ran else { return }
+
+            // Late arrivals: every minute for ten minutes, restore again
+            // whenever an app that wasn't running before has appeared.
+            func runningBundles() -> Set<String> {
+                Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))
             }
-            // ADR-0003: this project targets one display configuration. With
-            // several managed Space sets a stored Space index doesn't identify
-            // which display it came from, and a guess scatters windows onto a
-            // Space the user never picked. Refuse, and say why.
-            guard spaceResolver.hasSupportedSpaceConfiguration else {
-                statusModel.lastError = "Restoring Spaces needs Spaces that span your displays. "
-                    + "Turn off System Settings → Desktop & Dock → \"Displays have separate Spaces\", "
-                    + "or use Restore now, which is unaffected."
-                DiagnosticLog.write("restore-spaces", "REFUSED: multiple managed Space sets (ADR-0003)")
-                LoggerRegistry.app.log(.info, "Restore Spaces refused: unsupported display/Spaces configuration")
-                return
-            }
-            do {
-                let configID = displayEnumerator.configurationID()
-                // Relocation planning is the one operation that genuinely needs
-                // every Space at once — it decides, per app, which Space to
-                // send that app's windows to. So union each Space's config into
-                // one working snapshot. Every other path reads a single Space.
-                let knownSpaces = snapshotStore.spaceIndices(forConfigurationID: configID)
-                var unioned: [WindowEntry] = []
-                var newestCapture: Date?
-                var unionDisplays: [DisplaySnapshot] = []
-                for index in knownSpaces {
-                    guard let s = try? snapshotStore.loadLatest(forConfigurationID: configID,
-                                                                spaceIndex: index) else { continue }
-                    unioned.append(contentsOf: s.windows)
-                    if newestCapture == nil || s.capturedAt > newestCapture! {
-                        newestCapture = s.capturedAt
-                        unionDisplays = s.displays
-                    }
-                }
-                guard !unioned.isEmpty, let capturedAt = newestCapture else {
-                    statusModel.lastError = "No Space configs exist for the current display configuration (\(configID)). Capture first."
-                    return
-                }
-                let snap = Snapshot(
-                    displayConfigurationID: configID,
-                    displays: unionDisplays,
-                    capturedAt: capturedAt,
-                    trigger: .manual,
-                    windows: unioned
-                )
-                LoggerRegistry.app.log(.info,
-                    "Restore Spaces: unioned \(unioned.count) window(s) from space configs \(knownSpaces)")
-
-                // Prefer per-window relocation (yabai) when it's available;
-                // otherwise the always-present per-app backend.
-                let backend = SpaceRelocationBackendFactory.best()
-                let assigner = SpaceAssigner(backend: backend)
-                LoggerRegistry.app.log(.info, "Restore Spaces backend: \(backend.name)")
-
-                var notes: [String] = []
-                var relocatedCount = 0
-                var failedCount = 0
-
-                if assigner.supportsPerWindowMoves {
-                    // Per-window: deep identity decides which window of an app
-                    // goes where, so two Brave windows can land on different
-                    // Spaces — the case the per-app backend cannot express.
-                    let live = try await restorerBackend.enumerateLiveWindows()
-                    let moves = SpaceAssignmentPlanner.perWindowMoves(snapshot: snap.windows, live: live)
-                    let unlanded = assigner.applyPerWindow(moves)
-                    relocatedCount = moves.count - unlanded.count
-                    failedCount = unlanded.count
-                    for move in unlanded {
-                        DiagnosticLog.write("restore-spaces",
-                            "\(move.bundleID) window \(move.windowID) -> space \(move.targetSpaceIndex): did not land")
-                    }
-                    if failedCount > 0 {
-                        notes.append("\(failedCount) window(s) couldn't be moved — see Settings → Snapshots.")
-                    }
-                } else {
-                    let plan = SpaceAssignmentPlanner.plan(for: snap.windows)
-                    let outcomes = assigner.apply(plan)
-                    let failed = outcomes.filter { !$0.applied }
-                    relocatedCount = outcomes.count - failed.count
-                    failedCount = failed.count
-
-                    for outcome in failed {
-                        DiagnosticLog.write("restore-spaces",
-                            "\(outcome.bundleID) -> space \(outcome.targetSpaceIndex): \(outcome.failureReason ?? "unknown")")
-                    }
-                    // Apps the do-no-harm guard skipped. Logged individually so
-                    // the skip is auditable — silently omitting them would read
-                    // as "PixPut ignored my windows".
-                    for skipped in plan.unrestorable {
-                        DiagnosticLog.write("restore-spaces",
-                            "\(skipped.bundleID): LEFT ALONE — \(skipped.windowCount) window(s) across "
-                            + "\(skipped.spaceCount) Spaces; best target would place "
-                            + "\(skipped.bestCaseSatisfied) and misplace \(skipped.bestCaseDisplaced)")
-                    }
-                    if !plan.unrestorable.isEmpty {
-                        let apps = plan.unrestorable.map(\.bundleID).joined(separator: ", ")
-                        notes.append("\(plan.totalLeftAlone) window(s) left where they are: "
-                            + "\(apps) had windows spread across Spaces, and macOS moves an app's "
-                            + "windows together — collapsing them onto one Space would misplace more "
-                            + "than it fixes. Move these by hand.")
-                    }
-                    // Surface the process-scoped limit plainly — a partial
-                    // restore the user isn't told about reads as a bug.
-                    if plan.totalDisplaced > 0 {
-                        let apps = plan.partial.map(\.bundleID).joined(separator: ", ")
-                        notes.append("\(plan.totalDisplaced) window(s) couldn't be placed: "
-                            + "\(apps) had windows on more than one Space, and macOS moves an app's "
-                            + "windows together.")
-                    }
-                    if failedCount > 0 {
-                        notes.append("\(failedCount) app(s) couldn't be relocated — see Settings → Snapshots.")
-                    }
-                }
-
-                // Relocation is asynchronous in the window server; give it a
-                // beat before AX starts reading frames, or the frame pass can
-                // race a window that is still mid-move.
-                try? await Task.sleep(nanoseconds: 250_000_000)
-
-                let activeIDs = Set(displayEnumerator.enumerate().map(\.fingerprint.id))
-                let report = try await restorer.apply(
-                    snap,
-                    activeDisplayFingerprintIDs: activeIDs,
-                    currentDisplayBoundsByID: currentDisplayBoundsByID(),
-                    onlySpaceIndex: nil            // every Space, not just the active one
-                )
-
-                statusModel.lastRestore = Date()
-                statusModel.lastRestoreMoved = report.moved
-                statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
-                statusModel.lastRestoreDisplaced = report.displacedNoMatchingDisplay
-
-                statusModel.lastError = notes.isEmpty ? nil : notes.joined(separator: " ")
-
-                LoggerRegistry.app.log(.info,
-                    "Restore Spaces via \(backend.name): relocated=\(relocatedCount) "
-                    + "failed=\(failedCount) frames moved=\(report.moved)")
-            } catch {
-                let msg = Self.describe(error: error, operation: "restore Spaces")
-                statusModel.lastError = msg
-                LoggerRegistry.app.log(.error, "Restore Spaces failed: \(error)")
+            var seen = runningBundles()
+            let retryDeadline = Date().addingTimeInterval(10 * 60)
+            while Date() < retryDeadline {
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+                if isScreenLockedNow() { continue }
+                let now = runningBundles()
+                let newcomers = now.subtracting(seen)
+                guard !newcomers.isEmpty else { continue }
+                seen = now
+                DiagnosticLog.write("restore-spaces",
+                    "afterRestart: new app(s) \(newcomers.sorted().joined(separator: ", ")) — restoring again")
+                await self.performRestoreSpaces(trigger: .afterRestart)
             }
         }
     }

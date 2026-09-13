@@ -53,7 +53,36 @@ public actor DeepIdentityFetcher {
             "com.apple.Safari",
             "com.apple.dt.Xcode",
             "com.googlecode.iterm2",
+            "com.apple.finder",
         ]
+    }
+
+    /// Whether a bundle can report, for every window on every Space, a
+    /// document URL keyed by window title. This is the cross-Space identity
+    /// seam: AX exposes a window's document only on the active Space, but
+    /// AppleScript answers for all windows, and the title joins the answer to
+    /// yabai's window list.
+    public nonisolated static func reportsDocumentsByTitle(bundleID: String) -> Bool {
+        ScriptRegistry.documentsByTitleScript(forBundleID: bundleID) != nil
+    }
+
+    /// Document URL per window title for one app, across all Spaces. For
+    /// browsers that is the active tab's URL — the same value AX reports as
+    /// the window's document, so identities line up with captures. For
+    /// Finder it is the folder shown. `nil` when the bundle has no script,
+    /// isn't running, or Automation was denied this session.
+    public func documentsByTitle(bundleID: String) -> [String: URL]? {
+        if deniedBundles.contains(bundleID) { return nil }
+        guard let script = ScriptRegistry.documentsByTitleScript(forBundleID: bundleID) else { return nil }
+        do {
+            let result = try executor.execute(script)
+            return ScriptRegistry.parseDocumentsByTitle(result)
+        } catch let error as AppleScriptError {
+            if case .automationDenied = error.kind { deniedBundles.insert(bundleID) }
+            return nil
+        } catch {
+            return nil
+        }
     }
 
     /// Probe a bundle and return the outcome — used by the wizard so the
@@ -143,9 +172,126 @@ enum ScriptRegistry {
             return xcode()
         case "com.googlecode.iterm2":
             return iTerm2()
+        case "com.apple.finder":
+            return finder()
         default:
             return nil
         }
+    }
+
+    // MARK: - Documents by title (cross-Space identity)
+
+    /// AppleScript that returns `{ {title, documentURL}, ... }` for every
+    /// window of the app, on every Space. Chromium browsers report the active
+    /// tab's URL — identical to the AX document AX reports on the active
+    /// Space. Finder reports the folder as a file URL.
+    static func documentsByTitleScript(forBundleID bundleID: String) -> String? {
+        switch bundleID {
+        case "com.brave.Browser": return chromiumDocumentsByTitle(appName: "Brave Browser")
+        case "com.microsoft.edgemac": return chromiumDocumentsByTitle(appName: "Microsoft Edge")
+        case "com.google.Chrome": return chromiumDocumentsByTitle(appName: "Google Chrome")
+        case "company.thebrowser.Browser": return chromiumDocumentsByTitle(appName: "Arc")
+        case "com.apple.finder": return finderDocumentsByTitle()
+        default: return nil
+        }
+    }
+
+    private static func chromiumDocumentsByTitle(appName: String) -> String {
+        """
+        tell application "\(appName)"
+            set pairs to {}
+            repeat with w in windows
+                try
+                    set end of pairs to {name of w, URL of active tab of w}
+                on error
+                    set end of pairs to {name of w, ""}
+                end try
+            end repeat
+            return pairs
+        end tell
+        """
+    }
+
+    private static func finderDocumentsByTitle() -> String {
+        """
+        tell application "Finder"
+            set pairs to {}
+            repeat with w in Finder windows
+                try
+                    set end of pairs to {name of w, POSIX path of (target of w as alias)}
+                on error
+                    set end of pairs to {name of w, ""}
+                end try
+            end repeat
+            return pairs
+        end tell
+        """
+    }
+
+    static func parseDocumentsByTitle(_ descriptor: NSAppleEventDescriptor) -> [String: URL]? {
+        guard let pairs = AppleScriptResult.nestedStringList(descriptor) else { return nil }
+        return documentsByTitle(fromPairs: pairs)
+    }
+
+    /// Pure half of `parseDocumentsByTitle`, unit-testable without an Apple
+    /// Event descriptor. Paths become file URLs; anything else is parsed as
+    /// a URL; empty values are dropped. A title that appears twice with
+    /// different documents is dropped as ambiguous rather than guessed.
+    static func documentsByTitle(fromPairs pairs: [[String]]) -> [String: URL] {
+        var out: [String: URL] = [:]
+        var ambiguous: Set<String> = []
+        for pair in pairs where pair.count >= 2 {
+            let title = pair[0]
+            let raw = pair[1]
+            guard !raw.isEmpty else { continue }
+            let url: URL?
+            if raw.hasPrefix("/") {
+                url = URL(fileURLWithPath: raw).standardizedFileURL
+            } else {
+                url = URL(string: raw)
+            }
+            guard let url else { continue }
+            if let existing = out[title], existing != url { ambiguous.insert(title) }
+            out[title] = url
+        }
+        for title in ambiguous { out.removeValue(forKey: title) }
+        return out
+    }
+
+    // MARK: - Finder
+
+    /// Finder windows expose no AX document, so their identity used to be an
+    /// ordinal — meaningless after a restart. The folder path is the
+    /// identity a user would name ("my Downloads window").
+    private static func finder() -> Script {
+        let source = """
+        tell application "Finder"
+            set paths to {}
+            repeat with w in Finder windows
+                try
+                    set end of paths to POSIX path of (target of w as alias)
+                on error
+                    set end of paths to ""
+                end try
+            end repeat
+            return paths
+        end tell
+        """
+        return Script(source: source, parse: parseFolderPaths)
+    }
+
+    private static let parseFolderPaths: @Sendable (NSAppleEventDescriptor) -> [Int: WindowIdentity]? = { descriptor in
+        guard let paths = AppleScriptResult.stringList(descriptor) else { return nil }
+        return folderIdentities(fromPaths: paths)
+    }
+
+    /// Pure half of the Finder parser.
+    static func folderIdentities(fromPaths paths: [String]) -> [Int: WindowIdentity] {
+        var out: [Int: WindowIdentity] = [:]
+        for (idx, path) in paths.enumerated() where !path.isEmpty {
+            out[idx] = .documentPath(URL(fileURLWithPath: path).standardizedFileURL)
+        }
+        return out
     }
 
     // MARK: - Chromium-family (Brave / Edge / Chrome / Arc)
