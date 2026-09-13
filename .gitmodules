@@ -1,0 +1,3 @@
+[submodule "vendor/yabai"]
+	path = vendor/yabai
+	url = https://github.com/aaronscribner/yabai

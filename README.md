@@ -38,12 +38,22 @@ PixPut/
 ## Quick start (developer)
 
 ```bash
-# Run the test suite — 40/40 passing on the Core layer
+# yabai (per-window Space moves) is vendored as a submodule
+git submodule update --init --recursive
+
+# Run the test suite
 swift test
 
-# Build PixPut.app (unsigned debug bundle)
+# Build PixPut.app. This also builds vendor/yabai, signs it with the same
+# Developer ID, and installs /Applications/Utilities/yabai.app (SKIP_YABAI=1 to skip).
 ./scripts/build-app.sh
 # → build/PixPut.app
+
+# One-time privileged yabai setup: sudoers rule for --load-sa, ~/.yabairc,
+# launch agent. Re-run after a yabai rebuild that changes the binary.
+# Then add /Applications/Utilities/yabai.app under Privacy & Security → Accessibility once;
+# the Developer ID signature keeps that grant valid across rebuilds.
+./scripts/setup-yabai.sh
 
 # Launch
 open build/PixPut.app

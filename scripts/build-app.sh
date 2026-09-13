@@ -25,6 +25,14 @@ CONTENTS="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS}/MacOS"
 RES_DIR="${CONTENTS}/Resources"
 
+# yabai is PixPut's per-window Space actuator (ADR-0002). It is built from
+# the vendored fork, signed with the same Developer ID as the app, and
+# installed at a stable path, so its Accessibility grant survives rebuilds.
+# SKIP_YABAI=1 skips it (CI, machines that only need the app).
+if [[ "${SKIP_YABAI:-0}" != "1" ]]; then
+    "${ROOT}/scripts/build-yabai.sh"
+fi
+
 echo "==> swift build (${CONFIG})"
 ( cd "${ROOT}" && swift build -c "${CONFIG}" )
 
