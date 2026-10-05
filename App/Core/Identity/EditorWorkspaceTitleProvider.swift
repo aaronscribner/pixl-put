@@ -18,8 +18,12 @@ public struct EditorWorkspaceTitleProvider: WindowIdentityProvider {
     public init() {}
 
     public func resolve(_ signal: WindowSignal) -> WindowIdentity? {
+        if JetBrainsProjectTitle.supports(bundleID: signal.bundleID) {
+            return JetBrainsProjectTitle.projectName(fromTitle: signal.title)
+                .map { .titleRegex(pattern: "editor.workspace", capturedValue: $0) }
+        }
         guard vscode.supports(bundleID: signal.bundleID) else { return nil }
-        guard var workspace = vscode.workspaceName(fromTitle: signal.title) else { return nil }
+        guard var workspace = vscode.workspaceName(fromTitle: signal.title, bundleID: signal.bundleID) else { return nil }
         // The current title format ends in " (Workspace)" — strip it so the
         // stored value is just the workspace name. Stable either way, but
         // cleaner in logs and the Snapshots inspector.
@@ -31,5 +35,28 @@ public struct EditorWorkspaceTitleProvider: WindowIdentityProvider {
         // The workspace name IS a value captured from the title. Two windows
         // of the same workspace share it; the open file is ignored.
         return .titleRegex(pattern: "editor.workspace", capturedValue: workspace)
+    }
+}
+
+/// JetBrains IDEs title a project window `<project> – <file>` (en dash), or
+/// just `<project>` with no file open. The project is the stable part, the
+/// same way VS Code's workspace is.
+public enum JetBrainsProjectTitle {
+    public static let supportedBundleIDs: Set<String> = [
+        "com.jetbrains.intellij", "com.jetbrains.intellij.ce",
+        "com.jetbrains.pycharm", "com.jetbrains.pycharm.ce",
+        "com.jetbrains.WebStorm", "com.jetbrains.rider", "com.jetbrains.goland",
+        "com.jetbrains.CLion", "com.jetbrains.PhpStorm", "com.jetbrains.rubymine",
+        "com.jetbrains.datagrip", "com.jetbrains.rustrover", "com.google.android.studio",
+    ]
+
+    public static func supports(bundleID: String) -> Bool {
+        supportedBundleIDs.contains(bundleID)
+    }
+
+    public static func projectName(fromTitle title: String) -> String? {
+        let project = title.components(separatedBy: " – ").first?
+            .trimmingCharacters(in: .whitespaces) ?? ""
+        return project.isEmpty ? nil : project
     }
 }

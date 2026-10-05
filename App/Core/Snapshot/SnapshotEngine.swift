@@ -216,7 +216,8 @@ public actor SnapshotEngine {
                 isMinimized: axWindow.isMinimized,
                 isFullscreen: axWindow.isFullscreen,
                 capturedAt: capturedAt,
-                windowID: axWindow.windowID
+                windowID: axWindow.windowID,
+                title: axWindow.title.isEmpty ? nil : axWindow.title
             ))
             emittedAXFingerprints.insert(Self.dedupeKey(bundleID: axWindow.bundleID, frame: frame))
 
@@ -326,6 +327,19 @@ public actor SnapshotEngine {
         // normal work — they just navigate between Spaces).
         if let prev = previousSnapshot,
            Self.snapshotsAreEquivalent(prev.windows, entries) {
+            // Same layout, but titles moved on (or were never saved — layouts
+            // captured before titles were): refresh the current file in place.
+            // Titles are how order-only windows are told apart after a
+            // restart, so stale ones cost matches; a history slot is not
+            // worth spending on them.
+            if prev.windows.map(\.title) != entries.map(\.title) {
+                try store.replaceCurrent(snapshot, spaceIndex: activeSpaceIndex)
+                DiagnosticLog.write("capture", """
+                    REFRESH-TITLES: layout unchanged, titles updated in place. \
+                    trigger=\(trigger) spaceIndex=\(activeSpaceIndex) windows=\(entries.count)
+                    """)
+                return snapshot
+            }
             DiagnosticLog.write("capture", """
                 SKIP-SAVE: snapshot unchanged since last capture. \
                 trigger=\(trigger) spaceIndex=\(activeSpaceIndex) windows=\(entries.count). \

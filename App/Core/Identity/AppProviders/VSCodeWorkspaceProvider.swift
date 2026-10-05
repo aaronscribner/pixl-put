@@ -9,22 +9,45 @@ import Foundation
 ///   - "<file> — <workspace> [Working Tree] — Visual Studio Code"
 ///   - "<workspace> — Visual Studio Code"   (no file open)
 public struct VSCodeWorkspaceProvider: Sendable {
-    public static let supportedBundleIDs: Set<String> = [
-        "com.microsoft.VSCode",
-        // v1.1 candidates:
-        // "com.todesktop.230313mzl4w4u92",   // Cursor
-        // "com.vscodium",
+    /// The app name each editor appends to its window title. Forks keep VS
+    /// Code's title format and change only this suffix.
+    public static let titleSuffixByBundleID: [String: String] = [
+        "com.microsoft.VSCode": "Visual Studio Code",
+        "com.microsoft.VSCodeInsiders": "Visual Studio Code - Insiders",
+        "com.todesktop.230313mzl4w4u92": "Cursor",
+        "com.vscodium": "VSCodium",
+        "com.exafunction.windsurf": "Windsurf",
     ]
 
+    public static let supportedBundleIDs: Set<String> = Set(titleSuffixByBundleID.keys)
+
     public init() {}
+
+    /// Workspace name for any supported editor. VS Code keeps its original,
+    /// lenient parse. Forks require their own suffix: without it the last
+    /// title segment could be the app name itself, which would give every
+    /// window of the fork one shared identity — `nil` falls through to the
+    /// order-only rules instead.
+    public func workspaceName(fromTitle title: String, bundleID: String) -> String? {
+        if bundleID == "com.microsoft.VSCode" { return workspaceName(fromTitle: title) }
+        guard let appName = Self.titleSuffixByBundleID[bundleID] else { return nil }
+        let suffix = " — \(appName)"
+        guard title.hasSuffix(suffix) else { return nil }
+        let name = workspaceName(fromStrippedTitle: String(title.dropLast(suffix.count)))
+        return name?.isEmpty == false ? name : nil
+    }
 
     /// Extract workspace name from the title. The full absolute path is
     /// obtained at capture time via ScriptingBridge; this method handles
     /// the title-derived fallback when ScriptingBridge fails or is denied.
     public func workspaceName(fromTitle title: String) -> String? {
-        let stripped = title.replacingOccurrences(
+        workspaceName(fromStrippedTitle: title.replacingOccurrences(
             of: " — Visual Studio Code", with: ""
-        )
+        ))
+    }
+
+    /// The title with the app-name suffix already removed.
+    private func workspaceName(fromStrippedTitle stripped: String) -> String? {
         // Strip trailing "[Working Tree]" or similar git decorations.
         let cleaned = stripped.replacingOccurrences(
             of: #"\s*\[[^\]]+\]\s*$"#,

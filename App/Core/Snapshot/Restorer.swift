@@ -88,6 +88,8 @@ public struct LiveWindow: Sendable, Equatable {
     /// Required to address a single window for per-window Space relocation
     /// (ADR-0002); `nil` falls back to the per-app relocation path.
     public let windowID: CGWindowID?
+    /// The window's current title, when known. Feeds `FallbackMatcher`.
+    public let title: String?
 
     public init(
         opaqueID: ObjectIdentifier? = nil,
@@ -97,7 +99,8 @@ public struct LiveWindow: Sendable, Equatable {
         currentFrame: CGRectCodable,
         currentDisplayFingerprintID: String,
         windowID: CGWindowID? = nil,
-        isFullscreen: Bool
+        isFullscreen: Bool,
+        title: String? = nil
     ) {
         self.opaqueID = opaqueID
         self.bundleID = bundleID
@@ -107,6 +110,7 @@ public struct LiveWindow: Sendable, Equatable {
         self.currentDisplayFingerprintID = currentDisplayFingerprintID
         self.windowID = windowID
         self.isFullscreen = isFullscreen
+        self.title = title
     }
 }
 
@@ -116,6 +120,9 @@ public struct RestoreReport: Sendable, Equatable {
     public let moved: Int
     public let skippedAlreadyAtFrame: Int
     public let skippedMissingWindow: Int
+    /// Saved windows whose app has open windows PixlPut could not tell apart
+    /// (order-only, no unique title, more than one window). Left alone.
+    public let skippedUnidentified: Int
     public let displacedNoMatchingDisplay: Int
     public let cancelledByUserInteraction: Int
     public let fullscreenAttempts: Int
@@ -184,17 +191,19 @@ public actor Restorer {
 
     /// Apply a snapshot to the current OS state.
     ///
-    /// Matching algorithm (revised):
-    ///   1. Group both snapshot entries and live windows by
-    ///      `(bundleID, identity)` — this prevents the cross-bundle
-    ///      ordinal-collision that caused windows to "disappear" on
-    ///      restore in earlier builds.
-    ///   2. Within each group, sort both sides by `ordinalInApp` and
-    ///      pair them off — this disambiguates the legitimate same-bundle
-    ///      same-identity case (e.g. two iTerm2 windows both in `~/work`).
-    ///   3. Snapshot entries with no remaining live window count as
-    ///      `skippedMissingWindow` (FR-011). Live windows with no
-    ///      matching snapshot entry are simply left alone.
+    /// Matching, strongest evidence first:
+    ///   0. Window ID, for entries captured in this boot
+    ///      (`windowIDsValidSince`, default the current boot time).
+    ///   1. `(bundleID, identity)` for entries with a real identity. Within
+    ///      a group both sides pair in `ordinalInApp` order — the ordinal
+    ///      only breaks ties between windows sharing an identity (two iTerm2
+    ///      windows in `~/work`).
+    ///   2. Per app, what is left: a unique exact title, then a sole
+    ///      remaining order-only window (`FallbackMatcher`). Order-only
+    ///      entries never pair on list position alone.
+    ///   3. Leftover entries count as `skippedUnidentified` when their app
+    ///      still has unclaimed open windows, else `skippedMissingWindow`
+    ///      (FR-011). Live windows with no entry are left alone.
     ///   4. Each live window is consumed at most once — so no window
     ///      gets moved twice or hijacks another window's target frame.
     public func apply(
@@ -202,7 +211,8 @@ public actor Restorer {
         activeDisplayFingerprintIDs: Set<String>,
         currentDisplayBoundsByID: [String: CGRectCodable] = [:],
         onlySpaceIndex: Int? = nil,
-        movePolicy: MovePolicy = .fast
+        movePolicy: MovePolicy = .fast,
+        windowIDsValidSince: Date? = BootDetection.currentBootTime
     ) async throws -> RestoreReport {
         // Only apps named by the entries we'll consider need enumerating —
         // live windows of other apps are left alone regardless (constructive
@@ -276,7 +286,11 @@ public actor Restorer {
         var pairedLiveIDs: Set<CGWindowID> = []
         var remainingEntries: [WindowEntry] = []
         for entry in entriesToConsider {
+            // A window ID from an earlier boot names whatever the window
+            // server handed that number to this time — often another window
+            // of the same app (BootDetection.windowIDIsCurrent).
             if let wid = entry.windowID,
+               BootDetection.windowIDIsCurrent(capturedAt: entry.capturedAt, bootTime: windowIDsValidSince),
                let liveWindow = liveByWindowID[wid],
                liveWindow.bundleID == entry.bundleID,
                !pairedLiveIDs.contains(wid) {
@@ -293,15 +307,17 @@ public actor Restorer {
             return !pairedLiveIDs.contains(wid)
         }
 
-        // Group the remaining live windows by (bundleID, identity),
-        // preserving an ordinal-sorted list per key for within-group pairing.
-        var liveByKey: [MatchKey: [LiveWindow]] = [:]
-        for w in identityLive {
-            let key = MatchKey(bundleID: w.bundleID, identity: w.identity)
-            liveByKey[key, default: []].append(w)
+        // Group the remaining live windows by (bundleID, identity), keeping
+        // each window's index into `identityLive` so the fallback pass knows
+        // which ones identity left unclaimed. Ordinal-sorted within a key: the
+        // ordinal breaks ties between windows that share a real identity (two
+        // iTerm2 windows in ~/work), and is never a match key on its own.
+        var liveByKey: [MatchKey: [Int]] = [:]
+        for (index, w) in identityLive.enumerated() {
+            liveByKey[MatchKey(bundleID: w.bundleID, identity: w.identity), default: []].append(index)
         }
         for (k, group) in liveByKey {
-            liveByKey[k] = group.sorted { $0.ordinalInApp < $1.ordinalInApp }
+            liveByKey[k] = group.sorted { identityLive[$0].ordinalInApp < identityLive[$1].ordinalInApp }
         }
 
         // Group the remaining snapshot entries the same way.
@@ -311,48 +327,15 @@ public actor Restorer {
             snapshotByKey[key, default: []].append(e)
         }
 
-        // Bundles where ordinal-identity pairing is unreliable because
-        // the live ordinal-count differs from the snapshot's. Ordinal
-        // identity is "Nth window of bundle X by creation order" — it
-        // shifts when windows open/close in between captures, so any
-        // count mismatch means the ordinal mapping doesn't survive.
-        //
-        // Concrete case: Bambu Studio had popup + main captured (ordinals
-        // 0 and 1). User closed the popup; the main window's AX ordinal
-        // becomes 0. Without this check we'd pair `snapshot[ordinal=0]`
-        // (the popup's small frame) with `live[ordinal=0]` (the main
-        // window) and try to shrink the main window. Skipping ordinal
-        // pairs for this bundle preserves the user's current arrangement.
-        var snapshotOrdinalCount: [String: Int] = [:]
-        var liveOrdinalCount: [String: Int] = [:]
-        for entry in remainingEntries {
-            if case .ordinal = entry.identity {
-                snapshotOrdinalCount[entry.bundleID, default: 0] += 1
-            }
-        }
-        for w in identityLive {
-            if case .ordinal = w.identity {
-                liveOrdinalCount[w.bundleID, default: 0] += 1
-            }
-        }
-        let ordinalUnreliable: Set<String> = Set(snapshotOrdinalCount.keys.filter { bundle in
-            snapshotOrdinalCount[bundle] != liveOrdinalCount[bundle, default: 0]
-        })
-
         var moved = 0
         var skippedAlreadyAtFrame = 0
         var skippedMissingWindow = 0
+        var skippedUnidentified = 0
         var errored = 0
         var displacedNoMatchingDisplay = 0
         var cancelledByUserInteraction = 0
         var fullscreenAttempts = 0
         var fullscreenSucceeded = 0
-
-        // For determinism, iterate snapshot entries in the original order
-        // (not the dictionary's). Track per-key consumption position into
-        // the live-windows list. Uses the Space-filtered list when Phase C
-        // restricts to a single Space.
-        var consumed: [MatchKey: Int] = [:]
 
         DiagnosticLog.write("restore", """
             apply begin: entries=\(entriesToConsider.count) live=\(live.count) \
@@ -364,7 +347,7 @@ public actor Restorer {
             DiagnosticLog.write("restore", """
                 live group: bundle=\(key.bundleID) identity=\(key.identity) \
                 count=\(liveGroup.count) \
-                ordinals=\(liveGroup.map(\.ordinalInApp).map(String.init).joined(separator: ","))
+                ordinals=\(liveGroup.map { String(identityLive[$0].ordinalInApp) }.joined(separator: ","))
                 """)
         }
         for (key, snapGroup) in snapshotByKey {
@@ -446,44 +429,78 @@ public actor Restorer {
             decide(entry: entry, liveWindow: liveWindow, matchedBy: "windowID")
         }
 
-        // PHASE 1b — identity fallback for the rest.
-        for entry in remainingEntries {
-            let key = MatchKey(bundleID: entry.bundleID, identity: entry.identity)
+        // PHASE 1b — identity, for entries with a real identity. Within a key,
+        // entries and live windows pair in ordinal order. Order-only entries
+        // never pair here: an ordinal is a list position, renumbered when the
+        // app restarts and reordered as windows are focused, so equal counts
+        // don't make positions agree — that pairing could swap two windows.
+        var claimedLive: Set<Int> = []
+        var leftoverEntries: [WindowEntry] = []
+        let strongKeys = snapshotByKey.keys
+            .filter { if case .ordinal = $0.identity { return false } else { return true } }
+            .sorted { "\($0.bundleID)|\($0.identity)" < "\($1.bundleID)|\($1.identity)" }
+        for key in strongKeys {
+            let entries = snapshotByKey[key]!.sorted { $0.ordinalInApp < $1.ordinalInApp }
             let liveGroup = liveByKey[key] ?? []
-
-            let entryIndexInGroup = consumed[key, default: 0]
-            consumed[key] = entryIndexInGroup + 1
-
-            // Ordinal-identity sanity check: if the bundle's ordinal-count
-            // differs between snapshot and live, we can't trust ordinal
-            // mappings — they shift when windows open or close. Skip
-            // those entries rather than apply potentially wrong frames.
-            if case .ordinal = entry.identity, ordinalUnreliable.contains(entry.bundleID) {
-                skippedMissingWindow += 1
-                DiagnosticLog.write("restore", """
-                    decide: SKIP-ORDINAL-MISMATCH bundle=\(entry.bundleID) \
-                    identity=\(entry.identity) \
-                    snapshotOrdinalCount=\(snapshotOrdinalCount[entry.bundleID] ?? 0) \
-                    liveOrdinalCount=\(liveOrdinalCount[entry.bundleID] ?? 0) \
-                    snapshotSpaceIndex=\(entry.spaceIndex) — count mismatch, ordinal mapping unreliable
-                    """)
-                continue
+            for (position, entry) in entries.enumerated() {
+                guard position < liveGroup.count else {
+                    leftoverEntries.append(entry)
+                    continue
+                }
+                claimedLive.insert(liveGroup[position])
+                decide(entry: entry, liveWindow: identityLive[liveGroup[position]], matchedBy: "identity")
             }
+        }
+        for entry in remainingEntries {
+            if case .ordinal = entry.identity { leftoverEntries.append(entry) }
+        }
 
-            guard entryIndexInGroup < liveGroup.count else {
-                skippedMissingWindow += 1
-                DiagnosticLog.write("restore", """
-                    decide: SKIP-MISSING bundle=\(entry.bundleID) \
-                    identity=\(entry.identity) snapshotOrdinal=\(entry.ordinalInApp) \
-                    targetFrame=(\(entry.frame.x),\(entry.frame.y),\
-                    \(entry.frame.width)x\(entry.frame.height)) \
-                    snapshotSpaceIndex=\(entry.spaceIndex) \
-                    groupPos=\(entryIndexInGroup)/\(liveGroup.count)
-                    """)
-                continue
+        // PHASE 1c — what identity could not pair, per app: a unique exact
+        // title, then a sole remaining order-only window (FallbackMatcher).
+        // An entry left over while its app still has unclaimed live windows
+        // is unidentified, not missing — the window may well be open; PixlPut
+        // just can't tell which one it is, so it leaves them all alone.
+        let liveLeftByBundle = Dictionary(
+            grouping: identityLive.indices.filter { !claimedLive.contains($0) },
+            by: { identityLive[$0].bundleID }
+        )
+        let entriesLeftByBundle = Dictionary(grouping: leftoverEntries, by: \.bundleID)
+        for bundleID in entriesLeftByBundle.keys.sorted() {
+            let entries = entriesLeftByBundle[bundleID]!
+            let liveIndices = liveLeftByBundle[bundleID] ?? []
+            let pairs = FallbackMatcher.pair(
+                saved: entries.map { FallbackMatcher.Candidate(title: $0.title, identity: $0.identity) },
+                live: liveIndices.map {
+                    FallbackMatcher.Candidate(title: identityLive[$0].title, identity: identityLive[$0].identity)
+                }
+            )
+            var pairedEntries: Set<Int> = []
+            for pair in pairs {
+                pairedEntries.insert(pair.saved)
+                decide(entry: entries[pair.saved],
+                       liveWindow: identityLive[liveIndices[pair.live]],
+                       matchedBy: pair.reason.rawValue)
             }
-            let liveWindow = liveGroup[entryIndexInGroup]
-            decide(entry: entry, liveWindow: liveWindow, matchedBy: "identity")
+            let liveUnclaimed = liveIndices.count - pairs.count
+            for (index, entry) in entries.enumerated() where !pairedEntries.contains(index) {
+                if liveUnclaimed > 0 {
+                    skippedUnidentified += 1
+                    DiagnosticLog.write("restore", """
+                        decide: SKIP-UNIDENTIFIED bundle=\(entry.bundleID) identity=\(entry.identity) \
+                        savedLeft=\(entries.count - pairs.count) liveLeft=\(liveUnclaimed) \
+                        snapshotSpaceIndex=\(entry.spaceIndex) — no unique title or sole window to tell them apart
+                        """)
+                } else {
+                    skippedMissingWindow += 1
+                    DiagnosticLog.write("restore", """
+                        decide: SKIP-MISSING bundle=\(entry.bundleID) \
+                        identity=\(entry.identity) snapshotOrdinal=\(entry.ordinalInApp) \
+                        targetFrame=(\(entry.frame.x),\(entry.frame.y),\
+                        \(entry.frame.width)x\(entry.frame.height)) \
+                        snapshotSpaceIndex=\(entry.spaceIndex)
+                        """)
+                }
+            }
         }
 
         // PHASE 2 — Execute concurrently. AX moves are serialized at the
@@ -554,13 +571,13 @@ public actor Restorer {
         //
         // `errored` used to increment nothing, so a failed move silently
         // vanished from the totals and they no longer summed to `entries`.
-        let accounted = moved + skippedAlreadyAtFrame + skippedMissingWindow
+        let accounted = moved + skippedAlreadyAtFrame + skippedMissingWindow + skippedUnidentified
             + cancelledByUserInteraction + errored
         DiagnosticLog.write("restore", """
             apply done: space=\(onlySpaceIndex.map(String.init) ?? "all") \
             entries=\(entriesToConsider.count) accounted=\(accounted) \
             moved=\(moved) skippedAlreadyAtFrame=\(skippedAlreadyAtFrame) \
-            skippedMissingWindow=\(skippedMissingWindow) \
+            skippedMissingWindow=\(skippedMissingWindow) skippedUnidentified=\(skippedUnidentified) \
             displacedNoMatchingDisplay=\(displacedNoMatchingDisplay) \
             cancelledByUserInteraction=\(cancelledByUserInteraction) errored=\(errored) \
             fullscreenAttempts=\(fullscreenAttempts) fullscreenSucceeded=\(fullscreenSucceeded)\
@@ -571,6 +588,7 @@ public actor Restorer {
             moved: moved,
             skippedAlreadyAtFrame: skippedAlreadyAtFrame,
             skippedMissingWindow: skippedMissingWindow,
+            skippedUnidentified: skippedUnidentified,
             displacedNoMatchingDisplay: displacedNoMatchingDisplay,
             cancelledByUserInteraction: cancelledByUserInteraction,
             fullscreenAttempts: fullscreenAttempts,

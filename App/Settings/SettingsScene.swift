@@ -386,10 +386,17 @@ private struct IdentityPane: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            Section("Supported apps (v1)") {
-                AppRuleRow(icon: "globe", name: "Brave Browser", desc: "Tab-set identity")
-                AppRuleRow(icon: "doc.text", name: "Visual Studio Code", desc: "Workspace identity")
-                Text("Other apps (Edge, Chrome, Arc, Safari, Xcode, JetBrains, iTerm2, Terminal, Ghostty, Warp) use title-derived or ordinal identity in v1 and will get dedicated providers in v1.1.")
+            Section("How windows are recognized after a restart") {
+                AppRuleRow(icon: "globe", name: "Brave, Edge, Chrome, Arc, Safari",
+                           desc: "By the open tab — needs the setting above")
+                AppRuleRow(icon: "chevron.left.forwardslash.chevron.right",
+                           name: "VS Code, Cursor, VSCodium, Windsurf, JetBrains IDEs, Xcode",
+                           desc: "By workspace or project")
+                AppRuleRow(icon: "doc.text", name: "Terminal, TextEdit, Preview and other document apps",
+                           desc: "By folder or document")
+                AppRuleRow(icon: "macwindow", name: "Every other app (Teams, Outlook, Messages, Firefox…)",
+                           desc: "By an exact, unique title — or as the app's only window")
+                Text("Until an app quits, PixlPut recognizes each of its windows exactly. After the app or your Mac restarts, it relies on the rules above. When an app has several windows it can't tell apart, PixlPut leaves them where they are rather than guess.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -503,11 +510,12 @@ private struct AppRuleRow: View {
     let name: String
     let desc: String
     var body: some View {
-        HStack {
+        HStack(alignment: .firstTextBaseline) {
             Image(systemName: icon).foregroundStyle(Color.accentColor)
-            Text(name)
-            Spacer()
-            Text(desc).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name).fixedSize(horizontal: false, vertical: true)
+                Text(desc).font(.caption).foregroundStyle(.secondary)
+            }
         }
     }
 }

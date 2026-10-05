@@ -45,12 +45,25 @@ final class PerWindowSpaceMoveTests: XCTestCase {
         XCTAssertEqual(moves.first { $0.windowID == 202 }?.targetSpaceIndex, 7)
     }
 
-    func test_ordinalOnlyIdentity_isNeverRelocated() {
-        // Creation ordinals shift across app restarts; moving on that guess
-        // relocates the wrong window.
+    /// An app's only window can't be confused with another, so it is
+    /// relocated even though its identity is just a list position.
+    func test_soleOrderOnlyWindow_isRelocated() {
         let moves = SpaceAssignmentPlanner.perWindowMoves(
             snapshot: [entry("com.apple.Terminal", identity: .ordinal(0), space: 5)],
             live: [live("com.apple.Terminal", identity: .ordinal(0), windowID: 303)]
+        )
+        XCTAssertEqual(moves, [SpaceAssignmentPlanner.WindowMove(windowID: 303, targetSpaceIndex: 5,
+                                                                 bundleID: "com.apple.Terminal")])
+    }
+
+    func test_orderOnlyWindows_withNothingToTellThemApart_areNeverRelocated() {
+        // Ordinals shift across app restarts and focus changes; moving on
+        // that guess relocates the wrong window.
+        let moves = SpaceAssignmentPlanner.perWindowMoves(
+            snapshot: [entry("com.apple.Terminal", identity: .ordinal(0), space: 5),
+                       entry("com.apple.Terminal", identity: .ordinal(1), space: 2, ordinal: 1)],
+            live: [live("com.apple.Terminal", identity: .ordinal(0), windowID: 303),
+                   live("com.apple.Terminal", identity: .ordinal(1), windowID: 304, ordinal: 1)]
         )
         XCTAssertTrue(moves.isEmpty)
     }

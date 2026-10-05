@@ -19,6 +19,19 @@ traced back to a commit.
 
 ## [Unreleased]
 
+### Added
+- Windows of apps PixlPut has no deeper identity for (Teams, Outlook, Messages, Firefox, Slack, …) are matched after the app or the Mac restarts. Two rules, per app, in every restore path: an exact window title that occurs once among the saved windows and once among the open ones, then the app's sole remaining window. Before this, "Restore windows to their Spaces" and restore after a restart skipped every such window — 19 of them in the 2026-10-01 post-reboot run — and the per-Desktop restore paired them by list position when the counts happened to agree. Window titles are now saved with each capture; layouts captured earlier gain them on their next capture, which rewrites the current layout in place when only titles changed (no history slot used).
+- Window identity for VS Code forks (Cursor, VSCodium, Windsurf, VS Code Insiders) and JetBrains IDEs (IntelliJ, PyCharm, WebStorm, Rider, GoLand, CLion, PhpStorm, RubyMine, DataGrip, RustRover, Android Studio), from the workspace or project in the window title.
+- "Restore windows to their Spaces" pairs windows by window ID first, so order-only windows captured in the current boot always match.
+
+### Changed
+- Order-only windows are never paired on list position alone. That position is renumbered when an app restarts and reordered when windows are focused, so two windows of one app could swap places. When several windows of an app can't be told apart, they are left where they are and counted as `skippedUnidentified`.
+- The restore message says why windows were left alone: "couldn't tell these windows apart" (with app names and counts) or "not in your saved layout", instead of "N window(s) had no captured match". The diagnostic log records each unmatched app by reason and how every match was made (`matched by windowID|identity|title|sole-window`).
+- Settings → "How windows are recognized after a restart" lists which apps are matched by tab, workspace, document, or title.
+
+### Fixed
+- A saved window ID from an earlier boot could pair with a different window. The window server numbers windows from scratch after a restart and apps relaunching in the same order draw the same numbers again (VS Code windows 283–291 on 2026-10-01). Window IDs are now trusted only for windows captured since the current boot (`kern.boottime`).
+
 ## [1.1.0] — 2026-10-05
 
 The MVP release: restore across every Space and after a restart, per-Desktop

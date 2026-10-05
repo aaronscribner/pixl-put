@@ -215,4 +215,23 @@ final class SnapshotStoreTests: XCTestCase {
         let posix = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
         XCTAssertEqual(posix, 0o700)
     }
+
+    /// A title-only refresh rewrites the current layout without pushing a
+    /// real earlier layout out of history.
+    func test_replaceCurrent_doesNotRotateHistory() throws {
+        let store = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 8))
+        let base = SnapshotCodecTests.makeFixtureSnapshot()
+        let configID = base.displayConfigurationID
+        func named(_ name: String) -> Snapshot {
+            Snapshot(name: name, displayConfigurationID: configID, displays: base.displays,
+                     capturedAt: Date(timeIntervalSince1970: 100), trigger: .manual, windows: base.windows)
+        }
+        try store.save(named("earlier"), spaceIndex: 1)
+        try store.save(named("current"), spaceIndex: 1)
+        try store.replaceCurrent(named("current-with-titles"), spaceIndex: 1)
+
+        XCTAssertEqual(try store.loadLatest(forConfigurationID: configID, spaceIndex: 1)?.name, "current-with-titles")
+        XCTAssertEqual(try store.loadHistory(forConfigurationID: configID, spaceIndex: 1).map(\.name),
+                       ["current-with-titles", "earlier"])
+    }
 }

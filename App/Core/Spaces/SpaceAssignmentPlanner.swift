@@ -200,18 +200,12 @@ public enum SpaceAssignmentPlanner {
     /// windows of the *same* app are told apart and can be sent to different
     /// Spaces — which the per-app backend fundamentally cannot express.
     ///
-    /// Identity alone decides when every captured window with that identity
-    /// sat on one Space. The creation ordinal is consulted only when the same
-    /// identity was captured on several Spaces, and then only an exact
-    /// ordinal match with a single target counts. Ordinals are **not** part
-    /// of the primary key: they are renumbered whenever an app restarts, so
-    /// after a reboot every deep-identity window would otherwise fail to
-    /// match and the restore would silently move nothing.
-    ///
-    /// Windows identified only by `.ordinal` are skipped: creation ordinals
-    /// shift across app restarts, and relocating a window on that guess moves
-    /// the wrong one. Windows with no `windowID` are skipped because there is
-    /// nothing to address.
+    /// Matching rules are `perWindowMatches`'. Ordinals are **not** a match
+    /// key: they are renumbered whenever an app restarts and reordered as
+    /// windows are focused, so relocating a window on that guess moves the
+    /// wrong one. Order-only windows match only by window ID (same boot), a
+    /// unique title, or being their app's sole window. Windows with no
+    /// `windowID` are skipped because there is nothing to address.
     public static func perWindowMoves(
         snapshot: [WindowEntry],
         live: [LiveWindow]
@@ -231,59 +225,126 @@ public enum SpaceAssignmentPlanner {
         public let windowID: CGWindowID
         public let live: LiveWindow
         public let entry: WindowEntry
-        public init(windowID: CGWindowID, live: LiveWindow, entry: WindowEntry) {
+        /// What paired them: "windowID", "identity", "title" or "sole-window".
+        public let matchedBy: String
+        public init(windowID: CGWindowID, live: LiveWindow, entry: WindowEntry, matchedBy: String = "identity") {
             self.windowID = windowID
             self.live = live
             self.entry = entry
+            self.matchedBy = matchedBy
         }
     }
 
-    /// Pair live windows with captured entries by bundle + deep identity.
+    /// Pair live windows with captured entries, strongest evidence first:
     ///
-    /// When one identity was captured once, that entry wins regardless of
-    /// ordinal. When it was captured several times (same identity on several
-    /// Spaces, or two windows of one workspace), an exact ordinal match with
-    /// a single candidate decides; anything else is left alone. Each entry
-    /// is consumed at most once.
+    /// 1. **Window ID** — the same window, if it was captured in this boot
+    ///    (`BootDetection.windowIDIsCurrent`). Exact for every app, including
+    ///    order-only ones, while the app keeps running.
+    /// 2. **Identity** — bundle + deep identity. When one identity was
+    ///    captured once, that entry wins. When it was captured several times
+    ///    on one Space, any of them places the window. On several Spaces, a
+    ///    unique exact title decides, then an exact ordinal with a single
+    ///    candidate; anything else is left alone.
+    /// 3. **Fallback** — per app, whatever is left: a unique exact title, then
+    ///    a sole remaining order-only window (`FallbackMatcher`). This is what
+    ///    lets Teams, Outlook or Messages go back to their Space after a
+    ///    restart; before it, order-only windows were never matched here.
+    ///
+    /// Each entry and each live window is used at most once.
     public static func perWindowMatches(
         snapshot: [WindowEntry],
-        live: [LiveWindow]
+        live: [LiveWindow],
+        windowIDsValidSince: Date? = BootDetection.currentBootTime
     ) -> [WindowMatch] {
-        var entriesByKey: [String: [WindowEntry]] = [:]
-        for entry in snapshot {
-            if case .ordinal = entry.identity { continue }
-            entriesByKey[matchKey(bundleID: entry.bundleID, identity: entry.identity), default: []]
-                .append(entry)
+        var matches: [WindowMatch] = []
+        var consumedEntries: Set<Int> = []
+        var claimedWindowIDs: Set<CGWindowID> = []
+        // Deterministic live order so runs are reproducible and diffable.
+        let orderedLive = live
+            .filter { $0.windowID != nil }
+            .sorted { ($0.bundleID, $0.windowID ?? 0) < ($1.bundleID, $1.windowID ?? 0) }
+
+        // 1. Window ID.
+        let liveByWindowID = Dictionary(orderedLive.map { ($0.windowID!, $0) },
+                                        uniquingKeysWith: { first, _ in first })
+        for (index, entry) in snapshot.enumerated() {
+            guard let wid = entry.windowID,
+                  BootDetection.windowIDIsCurrent(capturedAt: entry.capturedAt, bootTime: windowIDsValidSince),
+                  let window = liveByWindowID[wid], window.bundleID == entry.bundleID,
+                  !claimedWindowIDs.contains(wid) else { continue }
+            consumedEntries.insert(index)
+            claimedWindowIDs.insert(wid)
+            matches.append(WindowMatch(windowID: wid, live: window, entry: entry, matchedBy: "windowID"))
         }
 
-        var consumed: Set<WindowEntry> = []
-        var matches: [WindowMatch] = []
-        // Deterministic live order so runs are reproducible and diffable.
-        let orderedLive = live.sorted { ($0.bundleID, $0.windowID ?? 0) < ($1.bundleID, $1.windowID ?? 0) }
+        // 2. Identity, for entries with a real identity.
+        var entriesByKey: [String: [Int]] = [:]
+        for (index, entry) in snapshot.enumerated() where !consumedEntries.contains(index) {
+            if case .ordinal = entry.identity { continue }
+            entriesByKey[matchKey(bundleID: entry.bundleID, identity: entry.identity), default: []]
+                .append(index)
+        }
         for window in orderedLive {
+            let windowID = window.windowID!
+            if claimedWindowIDs.contains(windowID) { continue }
             if case .ordinal = window.identity { continue }
-            guard let windowID = window.windowID else { continue }
             let key = matchKey(bundleID: window.bundleID, identity: window.identity)
+            // Decide on every entry with this key, consumed or not: picking
+            // by elimination after an earlier pick would compound a wrong
+            // guess instead of leaving the window alone.
             guard let candidates = entriesByKey[key] else { continue }
 
-            let chosen: WindowEntry?
-            let distinctSpaces = Set(candidates.map(\.spaceIndex))
+            let chosen: Int?
+            let distinctSpaces = Set(candidates.map { snapshot[$0].spaceIndex })
             if candidates.count == 1 {
                 chosen = candidates[0]
             } else if distinctSpaces.count == 1 {
                 // Several windows of one identity, all on one Space (two
                 // VS Code windows of the same workspace): any unconsumed
                 // entry places this window correctly.
-                chosen = candidates.first { !consumed.contains($0) }
+                chosen = candidates.first { !consumedEntries.contains($0) }
             } else {
-                // Same identity on several Spaces: the ordinal is the only
-                // thing left that tells the windows apart.
-                let byOrdinal = candidates.filter { $0.ordinalInApp == window.ordinalInApp }
-                chosen = Set(byOrdinal.map(\.spaceIndex)).count == 1 ? byOrdinal.first : nil
+                // Same identity on several Spaces: a unique exact title tells
+                // the windows apart; failing that, an exact ordinal with a
+                // single target. Anything else stays where it is.
+                let byTitle = window.title.map { title in
+                    candidates.filter { snapshot[$0].title == title }
+                } ?? []
+                if byTitle.count == 1 {
+                    chosen = byTitle[0]
+                } else {
+                    let byOrdinal = candidates.filter { snapshot[$0].ordinalInApp == window.ordinalInApp }
+                    chosen = Set(byOrdinal.map { snapshot[$0].spaceIndex }).count == 1 ? byOrdinal.first : nil
+                }
             }
-            guard let entry = chosen, !consumed.contains(entry) else { continue }
-            consumed.insert(entry)
-            matches.append(WindowMatch(windowID: windowID, live: window, entry: entry))
+            guard let index = chosen, !consumedEntries.contains(index) else { continue }
+            consumedEntries.insert(index)
+            claimedWindowIDs.insert(windowID)
+            matches.append(WindowMatch(windowID: windowID, live: window, entry: snapshot[index], matchedBy: "identity"))
+        }
+
+        // 3. Fallback, per app, for what is left on both sides.
+        let entriesLeft = Dictionary(
+            grouping: snapshot.indices.filter { !consumedEntries.contains($0) },
+            by: { snapshot[$0].bundleID }
+        )
+        let liveLeft = Dictionary(
+            grouping: orderedLive.filter { !claimedWindowIDs.contains($0.windowID!) },
+            by: \.bundleID
+        )
+        for bundleID in entriesLeft.keys.sorted() {
+            guard let windows = liveLeft[bundleID] else { continue }
+            let entries = entriesLeft[bundleID]!
+            let pairs = FallbackMatcher.pair(
+                saved: entries.map { FallbackMatcher.Candidate(title: snapshot[$0].title, identity: snapshot[$0].identity) },
+                live: windows.map { FallbackMatcher.Candidate(title: $0.title, identity: $0.identity) }
+            )
+            for pair in pairs {
+                let window = windows[pair.live]
+                matches.append(WindowMatch(windowID: window.windowID!, live: window,
+                                           entry: snapshot[entries[pair.saved]],
+                                           matchedBy: pair.reason.rawValue))
+            }
         }
         return matches
     }

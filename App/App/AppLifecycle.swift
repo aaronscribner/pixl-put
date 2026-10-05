@@ -422,10 +422,10 @@ public final class AppLifecycle {
                 )
                 statusModelStart.lastRestore = Date()
                 statusModelStart.lastRestoreMoved = report.moved
-                statusModelStart.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
+                statusModelStart.lastRestoreSkipped = report.skippedMissingWindow + report.skippedUnidentified + report.skippedAlreadyAtFrame
                 statusModelStart.lastRestoreDisplaced = report.displacedNoMatchingDisplay
                 DiagnosticLog.write("startup",
-                    "restore-on-startup done: moved=\(report.moved) skipped=\(report.skippedMissingWindow + report.skippedAlreadyAtFrame)")
+                    "restore-on-startup done: moved=\(report.moved) skipped=\(report.skippedMissingWindow + report.skippedUnidentified + report.skippedAlreadyAtFrame)")
             } catch {
                 DiagnosticLog.write("startup",
                     "restore-on-startup failed: \(error)")
@@ -546,7 +546,7 @@ public final class AppLifecycle {
                     )
                     self.statusModel.lastRestore = Date()
                     self.statusModel.lastRestoreMoved = report.moved
-                    self.statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
+                    self.statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedUnidentified + report.skippedAlreadyAtFrame
                     self.statusModel.lastRestoreDisplaced = report.displacedNoMatchingDisplay
                     DiagnosticLog.write("restore",
                         "Space-switch restore (attempt \(attempt)/\(delaysMs.count)): space=\(spaceIndex) moved=\(report.moved) skippedAlreadyAtFrame=\(report.skippedAlreadyAtFrame) skippedMissingWindow=\(report.skippedMissingWindow)")
@@ -762,11 +762,14 @@ public final class AppLifecycle {
                 let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID(), onlySpaceIndex: activeSpace)
                 statusModel.lastRestore = Date()
                 statusModel.lastRestoreMoved = report.moved
-                statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
+                statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedUnidentified + report.skippedAlreadyAtFrame
                 statusModel.lastRestoreDisplaced = report.displacedNoMatchingDisplay
                 if report.moved == 0 && snap.windows.count > 0 {
                     statusModel.lastError = "Restore moved 0 of \(snap.windows.count) windows. "
                         + "\(report.skippedMissingWindow) windows from the snapshot weren't found, "
+                        + (report.skippedUnidentified > 0
+                           ? "\(report.skippedUnidentified) couldn't be told apart from other windows of their app, "
+                           : "")
                         + "\(report.skippedAlreadyAtFrame) were already at the recorded frame. "
                         + "Open Settings → Snapshots to inspect."
                 } else {
@@ -1028,13 +1031,29 @@ public final class AppLifecycle {
             captured=\(snap.windows.count)
             """)
 
-        // Unmatched live windows, by app, so "why didn't X move" is answerable.
+        // Unmatched live windows, by app and by reason, so "why didn't X
+        // move" is answerable from the log and the menu.
         let matchedIDs = Set(matches.map(\.windowID))
         let unmatched = index.filter { w in w.live.windowID.map { !matchedIDs.contains($0) } ?? true }
-        for app in Dictionary(grouping: unmatched, by: { $0.live.bundleID }).sorted(by: { $0.key < $1.key }) {
-            let kinds = Set(app.value.map { identityKind($0.live.identity) }).sorted().joined(separator: ",")
-            DiagnosticLog.write("restore-spaces",
-                "unmatched: \(app.key) \(app.value.count) window(s) [identity: \(kinds)]")
+        let unmatchedSummary = UnmatchedWindows.classify(
+            unmatchedLive: unmatched.map(\.live.bundleID),
+            saved: snap.windows,
+            matched: matches.map(\.entry)
+        )
+        let kindsByBundle = Dictionary(grouping: unmatched, by: { $0.live.bundleID })
+            .mapValues { Set($0.map { identityKind($0.live.identity) }).sorted().joined(separator: ",") }
+        for (reason, apps) in [("could-not-tell-apart", unmatchedSummary.couldNotTellApart),
+                               ("not-in-saved-layout", unmatchedSummary.notInSavedLayout),
+                               ("new-since-capture", unmatchedSummary.newSinceCapture)] {
+            for app in apps {
+                DiagnosticLog.write("restore-spaces", """
+                    unmatched (\(reason)): \(app.bundleID) \(app.count) window(s) \
+                    [identity: \(kindsByBundle[app.bundleID] ?? "")]
+                    """)
+            }
+        }
+        for (reason, count) in Dictionary(grouping: matches, by: \.matchedBy).mapValues(\.count).sorted(by: { $0.key < $1.key }) {
+            DiagnosticLog.write("restore-spaces", "matched by \(reason): \(count)")
         }
 
         // 1. Space moves — verified by re-reading each window's Space.
@@ -1112,7 +1131,7 @@ public final class AppLifecycle {
 
         statusModel.lastRestore = Date()
         statusModel.lastRestoreMoved = report.moved + movedCount + framed
-        statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
+        statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedUnidentified + report.skippedAlreadyAtFrame
         statusModel.lastRestoreDisplaced = report.displacedNoMatchingDisplay
 
         var notes: [String] = []
@@ -1127,12 +1146,16 @@ public final class AppLifecycle {
                    : " See the diagnostic log."))
         }
         if frameFailed > 0 { notes.append("\(frameFailed) frame(s) couldn't be set on other Spaces.") }
-        if !unmatched.isEmpty {
-            let apps = Dictionary(grouping: unmatched, by: { $0.live.bundleID }).keys.sorted()
-                .map { $0.components(separatedBy: ".").last ?? $0 }.prefix(5).joined(separator: ", ")
-            notes.append("\(unmatched.count) window(s) had no captured match (\(apps)"
-                + (unmatched.count > 5 ? ", …" : "") + ")"
-                + (statusModel.deepIdentityEnabled ? "." : "; turn on deep identity in Settings to match browser windows on other Spaces."))
+        if !unmatchedSummary.couldNotTellApart.isEmpty {
+            let apps = unmatchedSummary.couldNotTellApart
+            let browsers = apps.contains { BrowserTabSetProvider.supportedBundleIDs.contains($0.bundleID) }
+            notes.append("Left in place — couldn't tell these windows apart: \(Self.appList(apps))."
+                + (browsers && !statusModel.deepIdentityEnabled
+                   ? " Turn on \"Identify individual browser/editor windows\" in Settings to match browser windows by tab."
+                   : " Capture again once they're arranged to update their titles."))
+        }
+        if !unmatchedSummary.notInSavedLayout.isEmpty {
+            notes.append("Not in your saved layout: \(Self.appList(unmatchedSummary.notInSavedLayout)).")
         }
         statusModel.lastError = notes.isEmpty ? nil : notes.joined(separator: " ")
 
@@ -1222,7 +1245,7 @@ public final class AppLifecycle {
         )
         statusModel.lastRestore = Date()
         statusModel.lastRestoreMoved = report.moved
-        statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
+        statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedUnidentified + report.skippedAlreadyAtFrame
         statusModel.lastRestoreDisplaced = report.displacedNoMatchingDisplay
         statusModel.lastError = notes.isEmpty ? nil : notes.joined(separator: " ")
         LoggerRegistry.app.log(.info,
@@ -1233,6 +1256,20 @@ public final class AppLifecycle {
     private static func framesEqual(_ a: CGRectCodable, _ b: CGRectCodable, tolerance: Double) -> Bool {
         abs(a.x - b.x) <= tolerance && abs(a.y - b.y) <= tolerance
             && abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
+    }
+
+    /// "Firefox ×17, Messages" — app display names for menu copy, at most
+    /// four, then "and N more".
+    private static func appList(_ apps: [UnmatchedWindows.AppCount]) -> String {
+        let names = apps.map { app -> String in
+            let name = NSWorkspace.shared.urlForApplication(withBundleIdentifier: app.bundleID)
+                .map { FileManager.default.displayName(atPath: $0.path) }
+                .map { $0.hasSuffix(".app") ? String($0.dropLast(4)) : $0 }
+                ?? (app.bundleID.components(separatedBy: ".").last ?? app.bundleID)
+            return app.count > 1 ? "\(name) ×\(app.count)" : name
+        }
+        let shown = names.prefix(4).joined(separator: ", ")
+        return names.count > 4 ? "\(shown) and \(names.count - 4) more" : shown
     }
 
     private func identityKind(_ identity: WindowIdentity) -> String {
@@ -1327,7 +1364,7 @@ public final class AppLifecycle {
                 let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: activeIDs, currentDisplayBoundsByID: currentDisplayBoundsByID(), onlySpaceIndex: pickerSpace)
                 statusModel.lastRestore = Date()
                 statusModel.lastRestoreMoved = report.moved
-                statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedAlreadyAtFrame
+                statusModel.lastRestoreSkipped = report.skippedMissingWindow + report.skippedUnidentified + report.skippedAlreadyAtFrame
                 statusModel.lastError = nil
                 DiagnosticLog.write("restore",
                     "history slot=\(slot) applied: moved=\(report.moved)")
@@ -1474,7 +1511,8 @@ public final class AXRestorerBackend: RestorerBackend, @unchecked Sendable {
                 currentFrame: frame,
                 currentDisplayFingerprintID: displayFingerprintID,
                 windowID: cgWindowID,
-                isFullscreen: axw.isFullscreen
+                isFullscreen: axw.isFullscreen,
+                title: axw.title.isEmpty ? nil : axw.title
             ))
             byKey[AXKey(
                 bundleID: axw.bundleID,

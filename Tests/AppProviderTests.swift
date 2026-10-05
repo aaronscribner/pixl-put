@@ -96,4 +96,32 @@ final class VSCodeWorkspaceProviderTests: XCTestCase {
         let p = VSCodeWorkspaceProvider()
         XCTAssertNil(p.identity(fromWorkspaceURL: URL(string: "https://example.com")!))
     }
+
+    // MARK: - VS Code forks and JetBrains IDEs
+
+    private func resolve(_ bundleID: String, _ title: String, document: URL? = nil) -> WindowIdentity {
+        WindowIdentityResolver.defaultV1().resolve(WindowSignal(
+            bundleID: bundleID, title: title, documentURL: document, creationOrdinal: 3))
+    }
+
+    func test_cursor_workspaceFromTitle() {
+        XCTAssertEqual(resolve("com.todesktop.230313mzl4w4u92", "main.swift — PixPut — Cursor"),
+                       .titleRegex(pattern: "editor.workspace", capturedValue: "PixPut"))
+    }
+
+    /// Without the fork's own suffix the last segment could be anything —
+    /// even the app name, which would give every window one shared identity.
+    func test_fork_withoutItsSuffix_fallsThroughToOrderOnly() {
+        XCTAssertEqual(resolve("com.vscodium", "main.swift — PixPut"), .ordinal(3))
+    }
+
+    func test_jetBrains_projectFromTitle_ignoringTheOpenFile() {
+        let expected = WindowIdentity.titleRegex(pattern: "editor.workspace", capturedValue: "PixPut")
+        XCTAssertEqual(resolve("com.jetbrains.intellij", "PixPut – AppLifecycle.swift"), expected)
+        XCTAssertEqual(resolve("com.jetbrains.intellij", "PixPut – Restorer.swift",
+                               document: URL(fileURLWithPath: "/src/Restorer.swift")), expected,
+                       "the open file drifts; the project is the identity")
+        XCTAssertEqual(resolve("com.jetbrains.pycharm", "scripts"),
+                       .titleRegex(pattern: "editor.workspace", capturedValue: "scripts"))
+    }
 }

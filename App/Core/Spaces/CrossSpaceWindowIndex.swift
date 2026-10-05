@@ -97,7 +97,8 @@ public enum CrossSpaceWindowIndex {
                     currentFrame: frame,
                     currentDisplayFingerprintID: displayID,
                     windowID: w.id,
-                    isFullscreen: w.isNativeFullscreen ?? false
+                    isFullscreen: w.isNativeFullscreen ?? false,
+                    title: w.title.isEmpty ? nil : w.title
                 )
             }
             out.append(CrossSpaceWindow(live: live, spaceIndex: w.pixputSpaceIndex))

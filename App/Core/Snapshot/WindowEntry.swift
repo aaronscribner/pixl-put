@@ -25,6 +25,11 @@ public struct WindowEntry: Codable, Hashable, Sendable {
     /// falls back to identity. Meaningless after the owning app restarts —
     /// the fallback covers that case too.
     public let windowID: CGWindowID?
+    /// The window's AX title at capture time. Matches order-only windows
+    /// after their app restarts, when the window ID is gone and nothing else
+    /// tells two windows of one app apart (`FallbackMatcher`). `nil` in
+    /// snapshots captured before this field existed.
+    public let title: String?
 
     public init(
         bundleID: String,
@@ -36,7 +41,8 @@ public struct WindowEntry: Codable, Hashable, Sendable {
         isMinimized: Bool,
         isFullscreen: Bool,
         capturedAt: Date,
-        windowID: CGWindowID? = nil
+        windowID: CGWindowID? = nil,
+        title: String? = nil
     ) {
         self.bundleID = bundleID
         self.identity = identity
@@ -48,11 +54,12 @@ public struct WindowEntry: Codable, Hashable, Sendable {
         self.isFullscreen = isFullscreen
         self.capturedAt = capturedAt
         self.windowID = windowID
+        self.title = title
     }
 
     enum CodingKeys: String, CodingKey {
         case bundleID, identity, ordinalInApp, displayFingerprintID, spaceIndex,
-             frame, isMinimized, isFullscreen, capturedAt, windowID
+             frame, isMinimized, isFullscreen, capturedAt, windowID, title
     }
 
     public init(from decoder: Decoder) throws {
@@ -69,6 +76,7 @@ public struct WindowEntry: Codable, Hashable, Sendable {
         self.capturedAt = try c.decode(Date.self, forKey: .capturedAt)
         // Post-all-Spaces-capture field; absent in legacy snapshots.
         self.windowID = try c.decodeIfPresent(CGWindowID.self, forKey: .windowID)
+        self.title = try c.decodeIfPresent(String.self, forKey: .title)
     }
 }
 

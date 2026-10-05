@@ -18,6 +18,30 @@ public enum BootDetection {
                                    threshold: TimeInterval = freshBootThreshold) -> Bool {
         uptime >= 0 && uptime < threshold
     }
+
+    /// When this boot began (`kern.boottime`), or `nil` if the kernel won't
+    /// say. Unlike `ProcessInfo.systemUptime`, it does not drift across sleep.
+    ///
+    /// Window IDs are only unique within one boot: the window server numbers
+    /// from scratch after a restart, and apps relaunching in the same order
+    /// get the same low numbers back. A saved window ID from an earlier boot
+    /// can therefore name a different window of the same app now, so it is
+    /// only trusted for entries captured after this time.
+    public static let currentBootTime: Date? = {
+        var mib: [Int32] = [CTL_KERN, KERN_BOOTTIME]
+        var bootTime = timeval()
+        var size = MemoryLayout<timeval>.size
+        guard sysctl(&mib, 2, &bootTime, &size, nil, 0) == 0, bootTime.tv_sec > 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(bootTime.tv_sec)
+                    + TimeInterval(bootTime.tv_usec) / 1_000_000)
+    }()
+
+    /// Whether a window ID recorded at `capturedAt` can still name the same
+    /// window. `bootTime == nil` (unknown) trusts it, as before this rule.
+    public static func windowIDIsCurrent(capturedAt: Date, bootTime: Date?) -> Bool {
+        guard let bootTime else { return true }
+        return capturedAt >= bootTime
+    }
 }
 
 /// Tracks a sequence of window-count samples and reports when the count has

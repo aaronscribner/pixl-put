@@ -125,6 +125,21 @@ public struct SnapshotStore: Sendable {
         }
     }
 
+    /// Overwrite a Space's current snapshot without rotating history. For
+    /// refreshes that change no placement (window titles), which should not
+    /// push a real earlier layout out of history.
+    public func replaceCurrent(_ snapshot: Snapshot, spaceIndex: Int) throws {
+        try bootstrap()
+        let url = self.url(for: snapshot.displayConfigurationID, key: spaceKey(for: spaceIndex), slot: 0)
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        do {
+            try encoder.encode(snapshot).write(to: url, options: .atomic)
+        } catch {
+            throw StoreError.writeFailed(error.localizedDescription)
+        }
+    }
+
     /// Move current → .1, .1 → .2, … dropping the oldest file when it would exceed historyLimit-1.
     private func rotateForward(configID: String, key: String) throws {
         // Build list of existing slots (from highest backward), then rename

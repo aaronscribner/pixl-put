@@ -15,13 +15,14 @@ final class WindowIDMatchingTests: XCTestCase {
         identity: WindowIdentity,
         ordinal: Int = 0,
         frame: CGRectCodable,
-        windowID: CGWindowID?
+        windowID: CGWindowID?,
+        capturedAt: Date = Date()
     ) -> WindowEntry {
         WindowEntry(
             bundleID: bundle, identity: identity, ordinalInApp: ordinal,
             displayFingerprintID: displayID, spaceIndex: 0, frame: frame,
             isMinimized: false, isFullscreen: false,
-            capturedAt: Date(timeIntervalSince1970: 0), windowID: windowID
+            capturedAt: capturedAt, windowID: windowID
         )
     }
 
@@ -114,6 +115,35 @@ final class WindowIDMatchingTests: XCTestCase {
 
         XCTAssertEqual(report.moved, 0)
         XCTAssertEqual(report.skippedMissingWindow, 1, "no identity match either — reported missing")
+    }
+
+    /// Window numbers restart from scratch after a reboot, and apps that
+    /// relaunch in the same order draw the same low numbers back. An ID
+    /// saved in an earlier boot must not pair, even with a window of the
+    /// same app: here it would hand Terminal window B the frame of window A.
+    func test_windowIDFromAnEarlierBoot_doesNotPair() async throws {
+        let bootTime = Date(timeIntervalSince1970: 2_000)
+        let snap = snapshot([
+            entry(bundle: "com.apple.Terminal", identity: .ordinal(0), ordinal: 0, frame: target,
+                  windowID: 301, capturedAt: Date(timeIntervalSince1970: 1_000)),
+            entry(bundle: "com.apple.Terminal", identity: .ordinal(1), ordinal: 1, frame: elsewhere,
+                  windowID: 302, capturedAt: Date(timeIntervalSince1970: 1_000)),
+        ])
+        let backend = FakeBackend(live: [
+            liveWindow(bundle: "com.apple.Terminal", identity: .ordinal(0), ordinal: 0,
+                       frame: elsewhere, windowID: 301),
+            liveWindow(bundle: "com.apple.Terminal", identity: .ordinal(1), ordinal: 1,
+                       frame: target, windowID: 302),
+        ])
+        let restorer = Restorer(backend: backend, tolerancePoints: 1.0)
+
+        let report = try await restorer.apply(snap, activeDisplayFingerprintIDs: [displayID],
+                                              windowIDsValidSince: bootTime)
+
+        XCTAssertEqual(report.moved, 0, "stale IDs and bare list positions are both guesses")
+        XCTAssertEqual(report.skippedUnidentified, 2)
+        let moves = await backend.moveRequestCount()
+        XCTAssertEqual(moves, 0)
     }
 
     /// Legacy snapshots (windowID nil) still restore via identity — the join
