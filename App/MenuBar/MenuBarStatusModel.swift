@@ -14,12 +14,17 @@ public final class MenuBarStatusModel: ObservableObject {
     @Published public var lastRestoreDisplaced: Int = 0
     @Published public var hasAccessibilityPermission: Bool = false
     @Published public var isSpaceAware: Bool = false
-    /// When true, PixlPut skips per-app deep identity (no Automation
-    /// permission prompts for browsers / editors / terminals). Identity
-    /// falls back to title-regex + ordinal — Story-3 still works for
-    /// single-window-per-app cases; multiple-window-per-app cases use
-    /// the layer-3/4 fallback. Default: true (privacy-by-default).
-    @Published public var deepIdentityEnabled: Bool = false
+    /// When true, PixlPut reads per-app deep identity over AppleScript —
+    /// browser tabs, editor workspaces — which asks for
+    /// Automation permission once per app. When false, identity falls back to
+    /// title-regex + ordinal, which cannot tell apart several windows of one
+    /// app after a restart. Persisted; default false (privacy-by-default).
+    @Published public var deepIdentityEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(deepIdentityEnabled, forKey: Self.deepIdentityKey)
+        }
+    }
+    private static let deepIdentityKey = "PixlPut.deepIdentityEnabled"
     /// User setting: when true, PixlPut automatically restores windows to the
     /// captured layout after the machine wakes — the active Space immediately,
     /// and every other Space on the first visit after wake. When false, nothing
@@ -78,6 +83,7 @@ public final class MenuBarStatusModel: ObservableObject {
         // Default ON when the user has never set it.
         self.restoreOnSpaceSwitch = UserDefaults.standard.object(forKey: Self.autoRestoreKey) as? Bool ?? true
         self.restoreAfterRestart = UserDefaults.standard.object(forKey: Self.restoreAfterRestartKey) as? Bool ?? true
+        self.deepIdentityEnabled = UserDefaults.standard.bool(forKey: Self.deepIdentityKey)
         self.enableSpaceScreenshots = UserDefaults.standard.bool(forKey: Self.enableSpaceScreenshotsKey)
         self.enableSnapshotHistoryThumbnails = UserDefaults.standard.bool(forKey: Self.enableHistoryThumbnailsKey)
     }

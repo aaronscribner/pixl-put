@@ -48,7 +48,8 @@ APP_BUNDLE="${ROOT}/build/PixlPut.app"
 ENT="${ROOT}/Resources/Entitlements.plist"
 ZIP="${ROOT}/build/PixlPut.zip"
 
-"${ROOT}/scripts/build-app.sh" release
+# SKIP_INSTALL: packaging must not replace the developer's installed copy.
+SKIP_INSTALL=1 "${ROOT}/scripts/build-app.sh" release
 
 echo "==> codesign (inside-out, hardened runtime on every executable)"
 # NOT --deep: it can't apply per-artifact options and breaks Sparkle's nested

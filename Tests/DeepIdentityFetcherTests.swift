@@ -121,6 +121,127 @@ final class DeepIdentityFetcherTests: XCTestCase {
     }
 }
 
+/// Joining AppleScript results to AX windows. Scripts list an app's windows
+/// on every Space; AX lists only the active Space's.
+final class DeepIdentityJoinTests: XCTestCase {
+
+    private let brave = "com.brave.Browser"
+    private let here = URL(string: "https://example.com/on-this-space")!
+    private let elsewhere = URL(string: "https://example.com/on-another-space")!
+
+    /// The script saw a window on another Space first. Joined by position,
+    /// this Space's only window took that window's document.
+    func test_titleScriptApp_joinsByTitleNotPosition() {
+        let docs = ScriptRegistry.documentsByTitle(fromPairs: [
+            ["Elsewhere", elsewhere.absoluteString], ["Here", here.absoluteString],
+        ])
+        let inputs = DeepIdentityFetcher.signalInputs(
+            bundleID: brave, indexInApp: 0, title: "Here", axDocumentURL: nil,
+            identitiesByIndex: [brave: [0: .documentPath(elsewhere)]],
+            documentsByTitle: [brave: docs]
+        )
+        XCTAssertEqual(inputs.documentURL, here)
+        XCTAssertNil(inputs.appProviderIdentity, "the position join must not apply")
+    }
+
+    /// One title showing two different documents cannot be told apart by
+    /// title; no document beats a guessed one.
+    func test_ambiguousTitle_yieldsNoDocument() {
+        let docs = ScriptRegistry.documentsByTitle(fromPairs: [
+            ["New Tab", "https://a.example/"], ["New Tab", "https://b.example/"],
+        ])
+        let inputs = DeepIdentityFetcher.signalInputs(
+            bundleID: brave, indexInApp: 0, title: "New Tab", axDocumentURL: nil,
+            identitiesByIndex: [:], documentsByTitle: [brave: docs]
+        )
+        XCTAssertNil(inputs.documentURL)
+    }
+
+    /// Two windows on the same document share a title; that is not ambiguous.
+    func test_sameTitleSameDocument_isKept() {
+        let docs = ScriptRegistry.documentsByTitle(fromPairs: [
+            ["Here", here.absoluteString], ["Here", here.absoluteString],
+        ])
+        XCTAssertEqual(docs["Here"], here)
+    }
+
+    /// AX and yabai window titles carry the browser's name; AppleScript
+    /// window names do not. Before this, 26 of 26 Brave windows on inactive
+    /// Spaces went unmatched.
+    func test_windowTitleWithAppSuffix_findsScriptWindowName() {
+        let docs = ["Here": here]
+        XCTAssertEqual(DeepIdentityFetcher.documentURL(forWindowTitle: "Here - Brave", bundleID: brave, in: docs), here)
+        XCTAssertEqual(DeepIdentityFetcher.documentURL(forWindowTitle: "Here - Brave - Work", bundleID: brave, in: docs), here,
+                       "a profile name after the marker")
+        XCTAssertEqual(DeepIdentityFetcher.documentURL(forWindowTitle: "Here - Microsoft Edge", bundleID: "com.microsoft.edgemac", in: docs), here)
+        XCTAssertEqual(DeepIdentityFetcher.documentURL(forWindowTitle: "Here - Google Chrome", bundleID: "com.google.Chrome", in: docs), here)
+    }
+
+    func test_pageTitleContainingDash_keepsItsOwnDashes() {
+        let docs = ["A - B": here, "A": elsewhere]
+        XCTAssertEqual(DeepIdentityFetcher.documentURL(forWindowTitle: "A - B - Brave", bundleID: brave, in: docs), here)
+    }
+
+    func test_exactTitleMatches_andOnlyTheAppMarkerIsStripped() {
+        XCTAssertEqual(DeepIdentityFetcher.documentURL(forWindowTitle: "Here", bundleID: "company.thebrowser.Browser", in: ["Here": here]), here)
+        XCTAssertNil(DeepIdentityFetcher.documentURL(forWindowTitle: "Here - Elsewhere", bundleID: brave, in: ["Here": here]))
+        XCTAssertNil(DeepIdentityFetcher.documentURL(forWindowTitle: "Brave", bundleID: brave, in: ["": here]),
+                     "a bare marker has no page title to look up")
+    }
+
+    func test_axDocument_winsOverTitleJoin() {
+        let ax = URL(string: "https://example.com/from-ax")!
+        let inputs = DeepIdentityFetcher.signalInputs(
+            bundleID: "com.brave.Browser", indexInApp: 0, title: "Tab", axDocumentURL: ax,
+            identitiesByIndex: [:],
+            documentsByTitle: ["com.brave.Browser": ["Tab": URL(string: "https://example.com/other")!]]
+        )
+        XCTAssertEqual(inputs.documentURL, ax)
+    }
+
+    /// Scripted apps without a documents-by-title script keep the position join.
+    func test_appWithoutTitleScript_keepsPositionJoin() {
+        let workspace = WindowIdentity.editorWorkspace(URL(fileURLWithPath: "/Users/u/App.xcodeproj"))
+        let inputs = DeepIdentityFetcher.signalInputs(
+            bundleID: "com.apple.dt.Xcode", indexInApp: 1, title: "App", axDocumentURL: nil,
+            identitiesByIndex: ["com.apple.dt.Xcode": [1: workspace]], documentsByTitle: [:]
+        )
+        XCTAssertEqual(inputs.appProviderIdentity, workspace)
+    }
+
+    /// Capture and the cross-Space restore must resolve a window to the same
+    /// identity, or a saved window never matches its live one.
+    func test_titleJoinedIdentity_matchesCrossSpaceIndex() {
+        // Script names are page titles; window titles carry " - Brave".
+        let docs = [brave: ["Here": here]]
+        let inputs = DeepIdentityFetcher.signalInputs(
+            bundleID: brave, indexInApp: 0, title: "Here - Brave", axDocumentURL: nil,
+            identitiesByIndex: [:], documentsByTitle: docs
+        )
+        let captured = WindowIdentityResolver.defaultV1().resolve(WindowSignal(
+            bundleID: brave, title: "Here - Brave", documentURL: inputs.documentURL,
+            appProviderIdentity: inputs.appProviderIdentity, creationOrdinal: 0
+        ))
+
+        let rows = NativeWindowQuery.build(
+            descriptors: [CGWindowDescriptor(
+                windowID: 5, ownerPID: 7, bundleID: brave, title: "",
+                bounds: CGRectCodable(x: 0, y: 0, width: 800, height: 600), isOnScreen: false
+            )],
+            spaceIDsByWindow: [5: [40]],
+            orderedSpaceIDs: [30, 40],
+            titlesByWindowID: [5: "Here - Brave"]
+        )
+        let live = CrossSpaceWindowIndex.build(
+            yabaiWindows: rows, bundleIDByPID: [7: brave],
+            documentsByTitle: docs, displayBoundsByID: [:]
+        )
+
+        XCTAssertEqual(captured, .documentPath(here))
+        XCTAssertEqual(live.first?.live.identity, captured)
+    }
+}
+
 final class XcodeAndTerminalProviderTests: XCTestCase {
 
     func test_xcodeProvider_identityFromPath_returnsEditorWorkspace() {

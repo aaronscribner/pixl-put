@@ -16,10 +16,12 @@ final class SnapshotStoreTests: XCTestCase {
 
     // T017 — write/read round-trip
     func test_snapshotStore_whenSaveThenLoadLatest_thenReturnsEqualSnapshot() throws {
-        let store = SnapshotStore(directory: tempDir)
+        let store = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 8))
         let snap = SnapshotCodecTests.makeFixtureSnapshot()
-        try store.save(snap, spaceIndex: 3)
-        let loaded = try store.loadLatest(forConfigurationID: snap.displayConfigurationID, spaceIndex: 3)
+        // Space 0: the fixture's entries are on Space 0, and a load reports
+        // entries on the Space they were loaded from.
+        try store.save(snap, spaceIndex: 0)
+        let loaded = try store.loadLatest(forConfigurationID: snap.displayConfigurationID, spaceIndex: 0)
         XCTAssertEqual(loaded, snap)
     }
 
@@ -28,7 +30,7 @@ final class SnapshotStoreTests: XCTestCase {
     /// to disturb another. Under the previous single-file layout this was the
     /// wholesale-replace-vs-additive-merge dilemma; here it is structural.
     func test_snapshotStore_whenSavingOneSpace_thenOtherSpacesAreUntouched() throws {
-        let store = SnapshotStore(directory: tempDir)
+        let store = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 8))
         let base = SnapshotCodecTests.makeFixtureSnapshot()
         let configID = base.displayConfigurationID
 
@@ -55,7 +57,7 @@ final class SnapshotStoreTests: XCTestCase {
     /// re-capturing Space 6 rewrites that file from what is actually there, so
     /// the moved window simply stops being listed.
     func test_snapshotStore_whenSourceSpaceRecaptured_thenMovedWindowIsNoLongerListed() throws {
-        let store = SnapshotStore(directory: tempDir)
+        let store = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 8))
         let base = SnapshotCodecTests.makeFixtureSnapshot()
         let configID = base.displayConfigurationID
 
@@ -74,7 +76,7 @@ final class SnapshotStoreTests: XCTestCase {
     }
 
     func test_snapshotStore_spaceIndices_listsOnlyCapturedSpacesAscending() throws {
-        let store = SnapshotStore(directory: tempDir)
+        let store = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 8))
         let base = SnapshotCodecTests.makeFixtureSnapshot()
         let configID = base.displayConfigurationID
         for index in [5, 0, 3] { try store.save(base, spaceIndex: index) }
@@ -83,11 +85,60 @@ final class SnapshotStoreTests: XCTestCase {
     }
 
     func test_snapshotStore_fileNameCarriesTheSpace() throws {
-        let store = SnapshotStore(directory: tempDir)
+        let store = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 8))
         let snap = SnapshotCodecTests.makeFixtureSnapshot()
         try store.save(snap, spaceIndex: 4)
         let names = try FileManager.default.contentsOfDirectory(atPath: tempDir.path)
-        XCTAssertTrue(names.contains("\(snap.displayConfigurationID).space4.plist"), "got \(names)")
+        XCTAssertTrue(names.contains("\(snap.displayConfigurationID).space-DESKTOP-4.plist"), "got \(names)")
+    }
+
+    /// The measured failure: a Desktop was deleted and another created in
+    /// front of a captured one, so position-keyed layouts landed on the wrong
+    /// Desktops. Keyed by Desktop, the layout follows it to its new position.
+    func test_layoutFollowsItsDesktop_whenADesktopIsInsertedBeforeIt() throws {
+        let base = SnapshotCodecTests.makeFixtureSnapshot()
+        let configID = base.displayConfigurationID
+        let before = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(["A", "B", "C", "D", "E", "F", "G"]))
+        try before.save(base, spaceIndex: 5)   // Desktop F
+
+        // G deleted; a new Desktop created at position 5, pushing F to 6.
+        let after = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(["A", "B", "C", "D", "E", "NEW", "F"]))
+
+        XCTAssertNil(try after.loadLatest(forConfigurationID: configID, spaceIndex: 5), "the new Desktop has no layout")
+        let followed = try XCTUnwrap(after.loadLatest(forConfigurationID: configID, spaceIndex: 6))
+        XCTAssertEqual(followed.id, base.id)
+        XCTAssertEqual(Set(followed.windows.map(\.spaceIndex)), [6], "entries report the Desktop's position now")
+        XCTAssertEqual(after.spaceIndices(forConfigurationID: configID), [6])
+    }
+
+    func test_layoutOfADeletedDesktop_isNotListedOrLoaded() throws {
+        let base = SnapshotCodecTests.makeFixtureSnapshot()
+        let configID = base.displayConfigurationID
+        let before = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(["A", "B", "C"]))
+        try before.save(base, spaceIndex: 2)   // Desktop C
+
+        let after = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(["A", "B"]))
+
+        XCTAssertEqual(after.spaceIndices(forConfigurationID: configID), [])
+        XCTAssertNil(try after.loadLatest(forConfigurationID: configID, spaceIndex: 2))
+    }
+
+    /// Without Desktop UUIDs (no single managed Space set) storage falls back
+    /// to position; with UUIDs those position-keyed files are ignored.
+    func test_withoutDesktopUUIDs_storageFallsBackToPosition() throws {
+        let base = SnapshotCodecTests.makeFixtureSnapshot()
+        let configID = base.displayConfigurationID
+        let positional = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(nil))
+        try positional.save(base, spaceIndex: 0)
+
+        let names = try FileManager.default.contentsOfDirectory(atPath: tempDir.path)
+        XCTAssertTrue(names.contains("\(configID).space0.plist"), "got \(names)")
+        XCTAssertEqual(positional.spaceIndices(forConfigurationID: configID), [0])
+        XCTAssertEqual(try positional.loadLatest(forConfigurationID: configID, spaceIndex: 0), base)
+
+        let keyed = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 3))
+        XCTAssertEqual(keyed.spaceIndices(forConfigurationID: configID), [])
+        XCTAssertNil(try keyed.loadLatest(forConfigurationID: configID, spaceIndex: 0))
     }
 
     // T017 — historyLimit=3 retains 3 generations including current
@@ -95,7 +146,7 @@ final class SnapshotStoreTests: XCTestCase {
         // historyLimit is now driven by UserDefaults, read live on every save.
         UserDefaults.standard.set(3, forKey: SnapshotStore.historyLimitDefaultsKey)
         defer { UserDefaults.standard.removeObject(forKey: SnapshotStore.historyLimitDefaultsKey) }
-        let store = SnapshotStore(directory: tempDir)
+        let store = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 8))
         let base = SnapshotCodecTests.makeFixtureSnapshot()
         // 5 distinct snapshots, distinguished by `id`
         var ids: [UUID] = []
@@ -125,13 +176,13 @@ final class SnapshotStoreTests: XCTestCase {
 
     // Schema-version refusal (forward-compat)
     func test_snapshotStore_whenLoadingUnknownSchema_thenThrowsUnsupportedSchemaVersion() throws {
-        let store = SnapshotStore(directory: tempDir)
+        let store = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 8))
         try store.bootstrap()
         let configID = "deadbeef"
         // Slot-0 file is a property list (the store migrated off JSON). Write
         // a fully-decodable snapshot plist with an unknown schemaVersion so
         // the version guard — not a decode failure — is what trips.
-        let url = tempDir.appendingPathComponent("\(configID).space0.plist")
+        let url = tempDir.appendingPathComponent("\(configID).space-DESKTOP-0.plist")
         let valid = Snapshot(
             displayConfigurationID: configID,
             displays: [],
@@ -158,7 +209,7 @@ final class SnapshotStoreTests: XCTestCase {
 
     // Mode 0o700 on bootstrap (constitution §IV — sensitive data)
     func test_snapshotStore_whenBootstrapping_thenDirectoryHasMode0o700() throws {
-        let store = SnapshotStore(directory: tempDir)
+        let store = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 8))
         try store.bootstrap()
         let attrs = try FileManager.default.attributesOfItem(atPath: tempDir.path)
         let posix = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0

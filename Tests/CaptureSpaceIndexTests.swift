@@ -79,6 +79,43 @@ final class CaptureSpaceIndexTests: XCTestCase {
         XCTAssertEqual(index, 5)
     }
 
+    // MARK: - Settling on the requested Space
+
+    private func decide(expected: Int?, reported: Int, observed: Int?, attempt: Int = 1) -> SnapshotEngine.SettleDecision {
+        SnapshotEngine.settleDecision(expected: expected, reported: reported, observed: observed,
+                                      attempt: attempt, maxAttempts: 4)
+    }
+
+    func test_settle_requestedSpaceAndWindowsAgree_proceeds() {
+        XCTAssertEqual(decide(expected: 2, reported: 2, observed: 2), .proceed)
+    }
+
+    func test_settle_windowsLagOnRequestedSpace_retries() {
+        XCTAssertEqual(decide(expected: 2, reported: 2, observed: 1), .retry(observed: 1))
+    }
+
+    /// The measured failure: with slow enumerations, a capture requested on
+    /// Space 1 settled once windows and display agreed on Space 4, where the
+    /// user had moved to, and was filed as Space 4. Agreement is not enough.
+    func test_settle_displayLeftRequestedSpace_refusesEvenWhenWindowsAgree() {
+        XCTAssertEqual(decide(expected: 1, reported: 4, observed: 4),
+                       .refuseLeftSpace(requested: 1, current: 4))
+    }
+
+    func test_settle_autoTriggerWithoutRequestedSpace_keepsOldRule() {
+        XCTAssertEqual(decide(expected: nil, reported: 3, observed: 3), .proceed)
+        XCTAssertEqual(decide(expected: nil, reported: 3, observed: 2), .retry(observed: 2))
+    }
+
+    func test_settle_attemptsExhausted_refusesAsStillChanging() {
+        XCTAssertEqual(decide(expected: 2, reported: 2, observed: 1, attempt: 4),
+                       .refuseStillChanging(reported: 2, observed: 1))
+    }
+
+    func test_settle_emptySpaceWithNoVoters_proceeds() {
+        XCTAssertEqual(decide(expected: 5, reported: 5, observed: nil), .proceed)
+    }
+
     func test_modalSpaceIndex_tieBreaksLowAndIsDeterministic() {
         let ids: [CGWindowID] = [1, 2, 3, 4]
         let table: [CGWindowID: Int] = [1: 3, 2: 3, 3: 1, 4: 1]

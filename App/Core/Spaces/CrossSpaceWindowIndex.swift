@@ -25,8 +25,10 @@ public struct CrossSpaceWindow: Equatable, Sendable {
 ///    seen a window its identity and creation ordinal are used verbatim, so
 ///    the active Space resolves exactly as capture did.
 /// 3. AppleScript documents-by-title for the rest: the active tab URL for
-///    browsers, the folder for Finder — the same values AX would have
-///    reported as the window's document had the Space been active.
+///    browsers — the same value AX would have reported as the window's
+///    document had the Space been active.
+///
+/// Apps that restore their own windows (`ExcludedApps`) are left out.
 /// 4. The shared identity resolver over (title, document), so VS Code's
 ///    workspace title and every other title rule apply unchanged.
 ///
@@ -51,7 +53,7 @@ public enum CrossSpaceWindowIndex {
                 && !(w.isMinimized ?? false)
                 && !(w.isHidden ?? false)
                 && w.frame.w >= minimumSide && w.frame.h >= minimumSide
-                && bundleIDByPID[w.pid] != nil
+                && bundleIDByPID[w.pid].map { !ExcludedApps.contains($0) } ?? false
         }
 
         // Creation ordinals for windows AX has not seen: CG window numbers
@@ -77,7 +79,9 @@ public enum CrossSpaceWindowIndex {
             if let ax = axLiveByWindowID[w.id] {
                 live = ax
             } else {
-                let document = documentsByTitle[bundleID]?[w.title]
+                let document = documentsByTitle[bundleID].flatMap {
+                    DeepIdentityFetcher.documentURL(forWindowTitle: w.title, bundleID: bundleID, in: $0)
+                }
                 let ordinal = ordinalByWindowID[w.id] ?? 0
                 let identity = resolver.resolve(WindowSignal(
                     bundleID: bundleID,

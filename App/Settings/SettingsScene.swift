@@ -92,7 +92,7 @@ private struct GeneralPane: View {
             Section("Behavior") {
                 Toggle("Auto-restore on Space switch & wake",
                        isOn: $statusModel.restoreOnSpaceSwitch)
-                Text("When ON, PixlPut restores your captured layout every time you switch to a Space, and after the machine wakes. Windows already in place aren't touched. When OFF, nothing is moved automatically; restore happens only when you click Restore now. Either way, the saved layout only changes when you click Capture now.")
+                Text("When ON, PixlPut puts windows back after anything that can displace them: waking from sleep, waking the displays, unlocking, or a display change. The Space on screen is restored right away, and every other Space the first time you visit it afterwards. Later visits leave windows alone, so a window you move stays where you put it until the next wake. Windows already in place aren't touched. When OFF, nothing is moved automatically; restore happens only when you click Restore now. Either way, the saved layout only changes when you click Capture now.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

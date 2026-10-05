@@ -56,6 +56,7 @@ public actor AXClient {
             queue.async {
                 var windows: [AXWindow] = []
                 var ordinalByBundle: [String: Int] = [:]
+                let windowOwners = Set(CGWindowEnumerator.enumerateAllWindows().map(\.ownerPID))
 
                 for runningApp in NSWorkspace.shared.runningApplications {
                     guard let bundleID = runningApp.bundleIdentifier else { continue }
@@ -64,6 +65,7 @@ public actor AXClient {
                     // Restore-side narrowing — see parameter doc.
                     if let allowed = limitToBundleIDs, !allowed.contains(bundleID) { continue }
                     let pid = runningApp.processIdentifier
+                    guard AXClient.ownsAWindow(pid: pid, windowOwners: windowOwners) else { continue }
                     let appElem = AXUIElementCreateApplication(pid)
                     // Bound AX messaging so a single hung/busy app can't stall
                     // the whole enumeration (all AX calls share one serial
@@ -81,6 +83,13 @@ public actor AXClient {
                     }
                     for (idx, axWindow) in axWindows.enumerated() {
                         // All attribute reads run here, on the AX queue.
+                        // Real windows only. AX also lists popups, hidden
+                        // placeholders and panels; each one saved would take an
+                        // ordinal from a real window of the same app.
+                        guard AXClient.isRestorableWindow(
+                            role: AXClient.readString(axWindow, kAXRoleAttribute),
+                            subrole: AXClient.readString(axWindow, kAXSubroleAttribute)
+                        ) else { continue }
                         let title = AXClient.readString(axWindow, kAXTitleAttribute) ?? ""
                         let documentURL = AXClient.readDocumentURL(axWindow)
                         let frame = AXClient.readFrame(of: axWindow)
@@ -117,6 +126,26 @@ public actor AXClient {
                 continuation.resume(returning: windows)
             }
         }
+    }
+
+    /// Whether an AX window is one a user placed: role `AXWindow` with a
+    /// standard, floating, or dialog subrole — the rule yabai's
+    /// `window_is_real` applies. Matching yabai is the point: it is the
+    /// cross-Space actuator and cannot address a window it does not track.
+    static func isRestorableWindow(role: String?, subrole: String?) -> Bool {
+        guard role == "AXWindow", let subrole else { return false }
+        return ["AXStandardWindow", "AXFloatingWindow", "AXDialog"].contains(subrole)
+    }
+
+    /// Whether to ask a process for its AX windows: only when the window server
+    /// lists it as owning a normal window, on any Space. Asking any other
+    /// process costs a round-trip for nothing, and one that never answers costs
+    /// the full messaging timeout — measured 2026-09-13, five WebKit
+    /// web-content helpers took 1s each, so every enumeration took ~7s and a
+    /// capture finished long after the user had left its Space. An empty owner
+    /// set means CoreGraphics gave no answer, so every process is walked.
+    static func ownsAWindow(pid: pid_t, windowOwners: Set<pid_t>) -> Bool {
+        windowOwners.isEmpty || windowOwners.contains(pid)
     }
 
     // MARK: - AX-queue-only read helpers

@@ -55,15 +55,27 @@ public actor SnapshotEngine {
     ///   (title regex) / layer-4 (ordinal) only. Default false — see
     ///   constitution §V "graceful permission degradation": PixlPut must
     ///   work as-well-as-the-permissions-allow without forcing prompts.
+    /// - Parameter expectedSpaceIndex: the Space the user asked to capture,
+    ///   read when they asked. If the display is on another Space by the time
+    ///   the window list is read, the capture is refused rather than filed
+    ///   under the Space the user happens to be on. `nil` for auto triggers.
     @discardableResult
-    public func capture(trigger: CaptureTrigger, useDeepIdentity: Bool = false) async throws -> Snapshot {
+    public func capture(
+        trigger: CaptureTrigger,
+        useDeepIdentity: Bool = false,
+        expectedSpaceIndex: Int? = nil
+    ) async throws -> Snapshot {
         let displays = displayEnumerator.enumerate()
         let configID = DisplayConfigurationID.compute(from: displays.map(\.fingerprint))
-        let displayUUIDByFingerprintID = Dictionary(uniqueKeysWithValues:
+        // Not `uniqueKeysWithValues:` — a repeated key would trap the app
+        // mid-capture. Fingerprint IDs include the display UUID, so a repeat
+        // means the same display listed twice; either value is right.
+        let displayUUIDByFingerprintID = Dictionary(
             displays.compactMap { d -> (String, String)? in
                 guard let uuid = d.fingerprint.displayUUID else { return nil }
                 return (d.fingerprint.id, uuid)
-            }
+            },
+            uniquingKeysWith: { first, _ in first }
         )
 
         // ENUMERATE, THEN SETTLE ON WHICH SPACE THESE WINDOWS BELONG TO.
@@ -84,7 +96,7 @@ public actor SnapshotEngine {
         var axWindows: [AXWindow] = []
         var activeSpaceIndex = 0
         var settleAttempt = 0
-        while true {
+        settle: while true {
             settleAttempt += 1
             axWindows = try await axClient.enumerateWindows()
             activeSpaceIndex = spaceResolver.activeSpaceIndex()
@@ -92,36 +104,50 @@ public actor SnapshotEngine {
                 of: axWindows.compactMap(\.windowID),
                 resolve: { spaceResolver.unambiguousSpaceIndex(forWindowID: $0) }
             )
-            // Agreement, or no window able to vote (an empty Space) — proceed.
-            guard let observed, observed != activeSpaceIndex else { break }
-
-            guard settleAttempt < Self.spaceSettleAttempts else {
+            switch Self.settleDecision(expected: expectedSpaceIndex, reported: activeSpaceIndex,
+                                       observed: observed, attempt: settleAttempt,
+                                       maxAttempts: Self.spaceSettleAttempts) {
+            case .proceed:
+                break settle
+            case .refuseLeftSpace(let requested, let current):
+                DiagnosticLog.write("capture", """
+                    REFUSE-SAVE: capture was requested on space \(requested) but the display is \
+                    on space \(current) now — the Space changed before the window list was read. \
+                    Saving would file one Space's windows under another. trigger=\(trigger)
+                    """)
+                throw CaptureError.spaceLeftBeforeCaptureFinished(requested: requested, current: current)
+            case .refuseStillChanging(let reported, let observed):
                 DiagnosticLog.write("capture", """
                     REFUSE-SAVE: Space still disagreeing after \(settleAttempt) attempts \
                     over \(Int(Double(settleAttempt - 1) * Self.spaceSettleDelaySeconds * 1000))ms. \
-                    Managed display says space \(activeSpaceIndex), windows are on \(observed). \
+                    Managed display says space \(reported), windows are on \(observed). \
                     Writing either would overwrite a good config. trigger=\(trigger)
                     """)
-                throw CaptureError.spaceChangedDuringCapture(reported: activeSpaceIndex,
-                                                             observed: observed)
+                throw CaptureError.spaceChangedDuringCapture(reported: reported, observed: observed)
+            case .retry(let observed):
+                DiagnosticLog.write("capture", """
+                    SETTLING: display says space \(activeSpaceIndex) but windows are on \(observed) \
+                    — AX has not caught up with the Space switch. Re-enumerating \
+                    (attempt \(settleAttempt)/\(Self.spaceSettleAttempts)).
+                    """)
+                try? await Task.sleep(nanoseconds: UInt64(Self.spaceSettleDelaySeconds * 1_000_000_000))
             }
-            DiagnosticLog.write("capture", """
-                SETTLING: display says space \(activeSpaceIndex) but windows are on \(observed) \
-                — AX has not caught up with the Space switch. Re-enumerating \
-                (attempt \(settleAttempt)/\(Self.spaceSettleAttempts)).
-                """)
-            try? await Task.sleep(nanoseconds: UInt64(Self.spaceSettleDelaySeconds * 1_000_000_000))
         }
         let capturedAt = Date()
 
         // Batch deep-identity fetch — only when explicitly enabled.
         // One AppleScript per scripted bundle that has at least one window.
+        // Title-joined where the app supports it — see `signalInputs`.
         var deepByBundle: [String: [Int: WindowIdentity]] = [:]
+        var documentsByTitle: [String: [String: URL]] = [:]
         if useDeepIdentity {
-            let scriptedBundleIDs = Set(axWindows.map(\.bundleID))
-                .filter { ScriptRegistry.script(forBundleID: $0) != nil }
-            for bundleID in scriptedBundleIDs {
-                if let result = await deepIdentityFetcher.identitiesForApp(bundleID: bundleID) {
+            for bundleID in Set(axWindows.map(\.bundleID)) {
+                if DeepIdentityFetcher.reportsDocumentsByTitle(bundleID: bundleID) {
+                    if let docs = await deepIdentityFetcher.documentsByTitle(bundleID: bundleID) {
+                        documentsByTitle[bundleID] = docs
+                    }
+                } else if ScriptRegistry.script(forBundleID: bundleID) != nil,
+                          let result = await deepIdentityFetcher.identitiesForApp(bundleID: bundleID) {
                     deepByBundle[bundleID] = result
                 }
             }
@@ -145,6 +171,8 @@ public actor SnapshotEngine {
             // when the screen is locked, so the size filter below won't
             // catch it.
             if Self.bundleBlocklist.contains(axWindow.bundleID) { continue }
+            // Apps that restore their own windows (Finder) — see ExcludedApps.
+            if ExcludedApps.contains(axWindow.bundleID) { continue }
 
             // Reject windows with zero or sub-real dimensions. macOS
             // sometimes hands AX a "Finder" window with frame
@@ -160,13 +188,20 @@ public actor SnapshotEngine {
                 .fingerprint.id ?? (displays.first?.fingerprint.id ?? "")
 
             // Per-app deep identity, if available for this bundle/window.
-            let appProviderIdentity = deepByBundle[axWindow.bundleID]?[axWindow.indexInApp]
+            let deep = DeepIdentityFetcher.signalInputs(
+                bundleID: axWindow.bundleID,
+                indexInApp: axWindow.indexInApp,
+                title: axWindow.title,
+                axDocumentURL: axWindow.documentURL,
+                identitiesByIndex: deepByBundle,
+                documentsByTitle: documentsByTitle
+            )
 
             let signal = WindowSignal(
                 bundleID: axWindow.bundleID,
                 title: axWindow.title,
-                documentURL: axWindow.documentURL,
-                appProviderIdentity: appProviderIdentity,
+                documentURL: deep.documentURL,
+                appProviderIdentity: deep.appProviderIdentity,
                 creationOrdinal: axWindow.creationOrdinal
             )
             let identity = resolver.resolve(signal)
@@ -315,6 +350,41 @@ public actor SnapshotEngine {
         /// data and the Space index describe different Spaces. Retrying once the
         /// transition settles is the fix; the caller should say so.
         case spaceChangedDuringCapture(reported: Int, observed: Int)
+        /// The user asked to capture one Space and the display was on another
+        /// by the time the window list was read. Nothing was saved.
+        case spaceLeftBeforeCaptureFinished(requested: Int, current: Int)
+    }
+
+    enum SettleDecision: Equatable {
+        case proceed
+        case retry(observed: Int)
+        case refuseStillChanging(reported: Int, observed: Int)
+        case refuseLeftSpace(requested: Int, current: Int)
+    }
+
+    /// What to do with one enumeration while settling which Space it describes.
+    ///
+    /// Once the display is on a Space other than the one the user asked to
+    /// capture, the window list can only describe the wrong Space, so retrying
+    /// cannot help: it would keep enumerating until the user stopped somewhere
+    /// and file that Space under a capture requested elsewhere. Measured
+    /// 2026-09-13 with ~7s enumerations: Capture now on five Spaces completed as
+    /// captures of the one Space the user lingered on, and nothing said so.
+    static func settleDecision(
+        expected: Int?,
+        reported: Int,
+        observed: Int?,
+        attempt: Int,
+        maxAttempts: Int
+    ) -> SettleDecision {
+        if let expected, reported != expected {
+            return .refuseLeftSpace(requested: expected, current: reported)
+        }
+        // Agreement, or no window able to vote (an empty Space).
+        guard let observed, observed != reported else { return .proceed }
+        return attempt < maxAttempts
+            ? .retry(observed: observed)
+            : .refuseStillChanging(reported: reported, observed: observed)
     }
 
     /// The Space index most of `windowIDs` sit on, or `nil` when none of them

@@ -117,9 +117,15 @@ else
     echo "    Set SIGN_IDENTITY env var or run unsigned for local dev."
 fi
 
-echo
-echo "Next steps:"
-echo "  - Launch:        open ${APP_BUNDLE}"
-echo "  - Run directly:  ${MACOS_DIR}/PixlPut"
+# Install to /Applications, register the login item, and relaunch.
+# SKIP_INSTALL=1 leaves the bundle in build/ only (CI, release packaging).
+if [[ "${SKIP_INSTALL:-0}" != "1" ]]; then
+    "${ROOT}/scripts/install-app.sh"
+else
+    echo
+    echo "Next steps:"
+    echo "  - Install + open at login:  scripts/install-app.sh"
+    echo "  - Run in place:             open ${APP_BUNDLE}"
+fi
 echo
 echo "Full release (signed + notarised + stapled): scripts/release-app.sh"

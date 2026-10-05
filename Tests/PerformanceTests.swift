@@ -17,7 +17,7 @@ final class PerformanceTests: XCTestCase {
         let snap = Self.make100WindowSnapshot()
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("pixput-perf-\(UUID().uuidString)", isDirectory: true)
-        let store = SnapshotStore(directory: tempDir)
+        let store = SnapshotStore(directory: tempDir, spaceKeys: FixedSpaceKeys(count: 1))
 
         defer { try? FileManager.default.removeItem(at: tempDir) }
 

@@ -53,7 +53,6 @@ public actor DeepIdentityFetcher {
             "com.apple.Safari",
             "com.apple.dt.Xcode",
             "com.googlecode.iterm2",
-            "com.apple.finder",
         ]
     }
 
@@ -66,23 +65,106 @@ public actor DeepIdentityFetcher {
         ScriptRegistry.documentsByTitleScript(forBundleID: bundleID) != nil
     }
 
+    /// The name a browser appends to its window titles. AX and yabai report
+    /// "Page - Brave", while the browser's AppleScript `name of window` is the
+    /// page title alone, so an exact join never matched — measured 2026-09-14:
+    /// 26 of 26 Brave and 3 of 3 Edge windows on inactive Spaces unmatched.
+    nonisolated static func windowTitleMarker(forBundleID bundleID: String) -> String? {
+        switch bundleID {
+        case "com.brave.Browser": return "Brave"
+        case "com.microsoft.edgemac": return "Microsoft Edge"
+        case "com.google.Chrome": return "Google Chrome"
+        default: return nil
+        }
+    }
+
+    /// A window's document, looked up by its title in a documents-by-title
+    /// table keyed by the browser's AppleScript window names.
+    ///
+    /// The title as-is is tried first (Arc, and any browser that doesn't
+    /// decorate titles), then the title up to the app's marker, so "Page -
+    /// Brave" and, with several profiles, "Page - Brave - Work" both look up
+    /// "Page". Only a segment that is exactly the marker counts, so a page
+    /// whose own title contains " - " keeps it: "A - B - Brave" looks up "A - B".
+    public nonisolated static func documentURL(
+        forWindowTitle title: String,
+        bundleID: String,
+        in documents: [String: URL]
+    ) -> URL? {
+        if let exact = documents[title] { return exact }
+        guard let marker = windowTitleMarker(forBundleID: bundleID) else { return nil }
+        let segments = title.components(separatedBy: " - ")
+        guard let markerIndex = segments.lastIndex(of: marker), markerIndex > 0 else { return nil }
+        return documents[segments[..<markerIndex].joined(separator: " - ")]
+    }
+
+    /// The document and app-provider identity to resolve one AX window with.
+    ///
+    /// Apps with a documents-by-title script are joined by title. Their
+    /// scripts list windows on every Space while AX lists only the active
+    /// one, so a position in one list is not a position in the other —
+    /// joined by position, a window could take another Space's document. It
+    /// is also the join the cross-Space restore uses, so capture and restore
+    /// resolve a window to the same identity. Other scripted apps keep the
+    /// position join. AX's own document always wins.
+    public nonisolated static func signalInputs(
+        bundleID: String,
+        indexInApp: Int,
+        title: String,
+        axDocumentURL: URL?,
+        identitiesByIndex: [String: [Int: WindowIdentity]],
+        documentsByTitle: [String: [String: URL]]
+    ) -> (documentURL: URL?, appProviderIdentity: WindowIdentity?) {
+        if reportsDocumentsByTitle(bundleID: bundleID) {
+            let joined = documentsByTitle[bundleID].flatMap {
+                documentURL(forWindowTitle: title, bundleID: bundleID, in: $0)
+            }
+            return (axDocumentURL ?? joined, nil)
+        }
+        return (axDocumentURL, identitiesByIndex[bundleID]?[indexInApp])
+    }
+
     /// Document URL per window title for one app, across all Spaces. For
     /// browsers that is the active tab's URL — the same value AX reports as
-    /// the window's document, so identities line up with captures. For
-    /// Finder it is the folder shown. `nil` when the bundle has no script,
+    /// the window's document, so identities line up with captures.
+    /// `nil` when the bundle has no script,
     /// isn't running, or Automation was denied this session.
     public func documentsByTitle(bundleID: String) -> [String: URL]? {
-        if deniedBundles.contains(bundleID) { return nil }
+        if deniedBundles.contains(bundleID) {
+            DiagnosticLog.write("identity", "\(bundleID) documents-by-title: skipped, Automation denied earlier this session")
+            return nil
+        }
         guard let script = ScriptRegistry.documentsByTitleScript(forBundleID: bundleID) else { return nil }
+        let start = DispatchTime.now()
         do {
             let result = try executor.execute(script)
-            return ScriptRegistry.parseDocumentsByTitle(result)
+            guard let pairs = AppleScriptResult.nestedStringList(result) else {
+                Self.logOutcome(bundleID, "documents-by-title", start, "result was not a list")
+                return nil
+            }
+            let docs = ScriptRegistry.documentsByTitle(fromPairs: pairs)
+            Self.logOutcome(bundleID, "documents-by-title", start,
+                            "\(pairs.count) window(s), \(docs.count) title(s) with a document")
+            return docs
         } catch let error as AppleScriptError {
+            Self.logOutcome(bundleID, "documents-by-title", start,
+                            "AppleScript failed: \(error.kind) — \(error.message)")
             if case .automationDenied = error.kind { deniedBundles.insert(bundleID) }
             return nil
         } catch {
+            Self.logOutcome(bundleID, "documents-by-title", start, "failed: \(error)")
             return nil
         }
+    }
+
+    /// Every script outcome goes to the diagnostic log. These fetches fail
+    /// quietly by design — identity falls back a layer — which left "why is
+    /// this Finder window ordinal-only" unanswerable. Counts only: titles and
+    /// URLs stay out of the log.
+    private nonisolated static func logOutcome(_ bundleID: String, _ what: String,
+                                               _ start: DispatchTime, _ outcome: String) {
+        let ms = (DispatchTime.now().uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+        DiagnosticLog.write("identity", "\(bundleID) \(what): \(outcome) in \(ms)ms")
     }
 
     /// Probe a bundle and return the outcome — used by the wizard so the
@@ -125,13 +207,22 @@ public actor DeepIdentityFetcher {
     /// `nil` return = no identities (script unavailable, app not running,
     /// or Automation denied this session).
     public func identitiesForApp(bundleID: String) -> [Int: WindowIdentity]? {
-        if deniedBundles.contains(bundleID) { return nil }
+        if deniedBundles.contains(bundleID) {
+            DiagnosticLog.write("identity", "\(bundleID) window identities: skipped, Automation denied earlier this session")
+            return nil
+        }
         guard let script = ScriptRegistry.script(forBundleID: bundleID) else { return nil }
 
+        let start = DispatchTime.now()
         do {
             let result = try executor.execute(script.source)
-            return script.parse(result)
+            let identities = script.parse(result)
+            Self.logOutcome(bundleID, "window identities", start,
+                            identities.map { "\($0.count) identity(ies)" } ?? "result could not be parsed")
+            return identities
         } catch let error as AppleScriptError {
+            Self.logOutcome(bundleID, "window identities", start,
+                            "AppleScript failed: \(error.kind) — \(error.message)")
             switch error.kind {
             case .automationDenied:
                 deniedBundles.insert(bundleID)
@@ -140,6 +231,7 @@ public actor DeepIdentityFetcher {
                 return nil
             }
         } catch {
+            Self.logOutcome(bundleID, "window identities", start, "failed: \(error)")
             return nil
         }
     }
@@ -172,8 +264,6 @@ enum ScriptRegistry {
             return xcode()
         case "com.googlecode.iterm2":
             return iTerm2()
-        case "com.apple.finder":
-            return finder()
         default:
             return nil
         }
@@ -184,14 +274,13 @@ enum ScriptRegistry {
     /// AppleScript that returns `{ {title, documentURL}, ... }` for every
     /// window of the app, on every Space. Chromium browsers report the active
     /// tab's URL — identical to the AX document AX reports on the active
-    /// Space. Finder reports the folder as a file URL.
+    /// Space.
     static func documentsByTitleScript(forBundleID bundleID: String) -> String? {
         switch bundleID {
         case "com.brave.Browser": return chromiumDocumentsByTitle(appName: "Brave Browser")
         case "com.microsoft.edgemac": return chromiumDocumentsByTitle(appName: "Microsoft Edge")
         case "com.google.Chrome": return chromiumDocumentsByTitle(appName: "Google Chrome")
         case "company.thebrowser.Browser": return chromiumDocumentsByTitle(appName: "Arc")
-        case "com.apple.finder": return finderDocumentsByTitle()
         default: return nil
         }
     }
@@ -203,22 +292,6 @@ enum ScriptRegistry {
             repeat with w in windows
                 try
                     set end of pairs to {name of w, URL of active tab of w}
-                on error
-                    set end of pairs to {name of w, ""}
-                end try
-            end repeat
-            return pairs
-        end tell
-        """
-    }
-
-    private static func finderDocumentsByTitle() -> String {
-        """
-        tell application "Finder"
-            set pairs to {}
-            repeat with w in Finder windows
-                try
-                    set end of pairs to {name of w, POSIX path of (target of w as alias)}
                 on error
                     set end of pairs to {name of w, ""}
                 end try
@@ -255,42 +328,6 @@ enum ScriptRegistry {
             out[title] = url
         }
         for title in ambiguous { out.removeValue(forKey: title) }
-        return out
-    }
-
-    // MARK: - Finder
-
-    /// Finder windows expose no AX document, so their identity used to be an
-    /// ordinal — meaningless after a restart. The folder path is the
-    /// identity a user would name ("my Downloads window").
-    private static func finder() -> Script {
-        let source = """
-        tell application "Finder"
-            set paths to {}
-            repeat with w in Finder windows
-                try
-                    set end of paths to POSIX path of (target of w as alias)
-                on error
-                    set end of paths to ""
-                end try
-            end repeat
-            return paths
-        end tell
-        """
-        return Script(source: source, parse: parseFolderPaths)
-    }
-
-    private static let parseFolderPaths: @Sendable (NSAppleEventDescriptor) -> [Int: WindowIdentity]? = { descriptor in
-        guard let paths = AppleScriptResult.stringList(descriptor) else { return nil }
-        return folderIdentities(fromPaths: paths)
-    }
-
-    /// Pure half of the Finder parser.
-    static func folderIdentities(fromPaths paths: [String]) -> [Int: WindowIdentity] {
-        var out: [Int: WindowIdentity] = [:]
-        for (idx, path) in paths.enumerated() where !path.isEmpty {
-            out[idx] = .documentPath(URL(fileURLWithPath: path).standardizedFileURL)
-        }
         return out
     }
 

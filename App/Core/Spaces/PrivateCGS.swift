@@ -131,6 +131,11 @@ enum PrivateCGS {
     /// Given a list of CG window IDs, return the set of Space IDs each
     /// belongs to. Mask `7` = all spaces (current + other displays + other
     /// Spaces). Returns an empty dict in degraded mode.
+    ///
+    /// NOT a per-window map for more than one window: every Space goes to the
+    /// first window (see below). For a map, call `spaces(forWindow:)` per
+    /// window — `NativeWindowQuery.spaceMap` does, after the bulk form dropped
+    /// 169 of 170 windows from a live restore on 2026-09-13.
     static func spacesForWindows(_ windowIDs: [CGWindowID]) -> [CGWindowID: [CGSSpaceID]] {
         guard !windowIDs.isEmpty else { return [:] }
         let s = symbols()
@@ -208,6 +213,36 @@ enum PrivateCGS {
         // Same rule as `spaceID(atIndex:displayUUID:)`: without a usable display
         // hint an index only means something when there is one managed set.
         return candidates.count == 1 ? candidates[0].index : nil
+    }
+
+    /// Desktop UUIDs of the one managed Space set, in Space order.
+    ///
+    /// `nil` when there is not exactly one managed set (ADR-0003: an index then
+    /// doesn't say which set it belongs to) or when any Space reports an empty
+    /// or duplicate UUID, so a caller keying storage by UUID can never merge two
+    /// Desktops into one file. Measured 2026-09-14: every Desktop, including the
+    /// first, reports a UUID matching yabai's.
+    static func managedSpaceUUIDs() -> [String]? {
+        let s = symbols()
+        guard let conn = s.mainConnectionID?(),
+              let copyFn = s.copyManagedDisplaySpaces,
+              let result = copyFn(conn) else {
+            return nil
+        }
+        let array = result.takeRetainedValue() as Array
+        guard array.count == 1,
+              let dict = array.first as? [String: Any],
+              let spaces = dict["Spaces"] as? [[String: Any]] else {
+            return nil
+        }
+        let uuids = spaces.compactMap { $0["uuid"] as? String }
+        guard !uuids.isEmpty,
+              uuids.count == spaces.count,
+              !uuids.contains(where: \.isEmpty),
+              Set(uuids).count == uuids.count else {
+            return nil
+        }
+        return uuids
     }
 
     /// The ordered Space IDs of every managed display, keyed by display UUID.

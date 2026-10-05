@@ -14,8 +14,8 @@ public struct AppProviderPassthrough: WindowIdentityProvider {
 
     public func resolve(_ signal: WindowSignal) -> WindowIdentity? {
         // Accept layer-1 and layer-2 identities. A layer-1 identity arriving
-        // through this seam (Finder's folder path, read over AppleScript
-        // because AX exposes no document for Finder windows) does not skip a
+        // through this seam (a document read over AppleScript for a window AX
+        // reports none for) does not skip a
         // layer: `DocumentPathProvider` already ran and found nothing. Lower
         // layers are still refused so a title or ordinal can't masquerade as
         // deep identity.

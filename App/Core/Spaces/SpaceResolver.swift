@@ -187,18 +187,27 @@ public struct CGWindowDescriptor: Sendable, Equatable {
 /// consent for non-pixel queries).
 public enum CGWindowEnumerator {
 
+    /// PID → bundle ID, tolerating a PID listed more than once.
+    /// `runningApplications` can report one process twice — measured
+    /// 2026-10-02, a WebKit web-content helper listed twice under the same
+    /// PID — and `Dictionary(uniqueKeysWithValues:)` traps on that: two
+    /// crashes, one after unlock and one seconds after relaunch, each losing
+    /// the pending wake restore. Both entries describe the same process, so
+    /// keeping the first is correct.
+    static func bundleIDsByPID(_ pairs: [(pid_t, String)]) -> [pid_t: String] {
+        Dictionary(pairs, uniquingKeysWith: { first, _ in first })
+    }
+
     public static func enumerateAllWindows() -> [CGWindowDescriptor] {
         let options: CGWindowListOption = [.optionAll, .excludeDesktopElements]
         guard let raw = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else {
             return []
         }
         // Map PID → bundle ID once; runningApplications is cheap but PID-keyed.
-        let pidToBundle: [pid_t: String] = Dictionary(
-            uniqueKeysWithValues: NSWorkspace.shared.runningApplications.compactMap {
-                guard let b = $0.bundleIdentifier else { return nil }
-                return ($0.processIdentifier, b)
-            }
-        )
+        let pidToBundle = bundleIDsByPID(NSWorkspace.shared.runningApplications.compactMap {
+            guard let b = $0.bundleIdentifier else { return nil }
+            return ($0.processIdentifier, b)
+        })
         var out: [CGWindowDescriptor] = []
         out.reserveCapacity(raw.count)
         for dict in raw {

@@ -667,6 +667,9 @@ public final class AppLifecycle {
 
     /// Manually capture (user invoked from menu bar).
     public func captureNow() {
+        // The Space being asked for is the one on screen at the click, not
+        // whichever one the user is on when the enumeration completes.
+        let requestedSpace = spaceResolver.activeSpaceIndex()
         Task { @MainActor in
             guard allowsManualFeatures else {
                 statusModel.lastError = "License required. Open menu bar → License… to activate or start a trial."
@@ -683,7 +686,8 @@ public final class AppLifecycle {
             do {
                 let snap = try await snapshotEngine.capture(
                     trigger: .manual,
-                    useDeepIdentity: statusModel.deepIdentityEnabled
+                    useDeepIdentity: statusModel.deepIdentityEnabled,
+                    expectedSpaceIndex: requestedSpace
                 )
                 statusModel.lastCapture = Date()
                 statusModel.lastCaptureWindowCount = snap.windows.count
@@ -943,16 +947,36 @@ public final class AppLifecycle {
         // stays the fallback, and remains the actuator either way: only it
         // can move another process's window between Spaces.
         //
-        // Titles are left to CrossSpaceWindowIndex, which already resolves
-        // identity from AX for the active Space and AppleScript documents for
-        // the rest — a better source than any title CoreGraphics could give.
+        // Titles come from yabai. On a Space AX cannot see, every identity is
+        // built from a title — VS Code's workspace name, and the browser
+        // documents joined by title — and CoreGraphics withholds titles
+        // without Screen Recording (0 of 13 VS Code windows, measured
+        // 2026-09-13). yabai reads them over AX for every window it tracks.
+        // One query serves both that and the tracked-window filter below.
+        let tracked = yabai.queryWindows()
+        let yabaiTitles = NativeWindowQuery.titles(from: tracked)
         let source: String
         let yabaiWindows: [YabaiWindow]
-        if let native = NativeWindowQuery.windows(), !native.isEmpty {
-            yabaiWindows = native
+        let untracked: Int
+        // CoreGraphics also lists windows no user placed: off-screen 500×500
+        // placeholders, popups, an app's hidden panels. Measured 2026-09-13:
+        // 13 beside 63 real windows, none tracked by yabai. Left in, each
+        // takes an ordinal from a real window of its app.
+        let native = NativeWindowQuery.windows(titlesByWindowID: yabaiTitles) ?? []
+        let restricted = NativeWindowQuery.restricted(
+            native, toTrackedIDs: tracked.map { Set($0.map(\.id)) }
+        )
+        if NativeWindowQuery.nativeCoversTracked(kept: restricted.kept.count, trackedCount: tracked?.count) {
+            yabaiWindows = restricted.kept
+            untracked = restricted.dropped
             source = "native"
-        } else if let fromYabai = yabai.queryWindows() {
+        } else if let fromYabai = tracked {
+            DiagnosticLog.write("restore-spaces", """
+                native window query unusable: \(restricted.kept.count) of \(fromYabai.count) \
+                yabai-tracked window(s), \(native.count) before filtering — planning from yabai's query
+                """)
             yabaiWindows = fromYabai
+            untracked = 0
             source = "yabai"
         } else {
             statusModel.lastError = "The window query failed, from both PixPut and yabai. Nothing was moved."
@@ -960,8 +984,8 @@ public final class AppLifecycle {
             return
         }
 
-        // Documents by title for other Spaces — browsers' active tab, Finder's
-        // folder. Gated like every other AppleScript use.
+        // Documents by title for other Spaces — browsers' active tab. Gated
+        // like every other AppleScript use.
         var documentsByTitle: [String: [String: URL]] = [:]
         if statusModel.deepIdentityEnabled {
             let bundles = Set(yabaiWindows.compactMap { bundleIDByPID[$0.pid] })
@@ -981,6 +1005,15 @@ public final class AppLifecycle {
             documentsByTitle: documentsByTitle,
             displayBoundsByID: currentBounds
         )
+        // Windows on other Spaces identified by a browser document joined by
+        // title. Zero while browsers are open on other Spaces means that join
+        // is broken again.
+        let browserDocs = index.filter { w in
+            guard let id = w.live.windowID, axByWindowID[id] == nil,
+                  DeepIdentityFetcher.reportsDocumentsByTitle(bundleID: w.live.bundleID),
+                  case .documentPath = w.live.identity else { return false }
+            return true
+        }.count
         let spaceByWindowID: [CGWindowID: Int] = Dictionary(
             index.compactMap { w in w.live.windowID.map { ($0, w.spaceIndex) } },
             uniquingKeysWith: { first, _ in first }
@@ -988,8 +1021,10 @@ public final class AppLifecycle {
         let matches = SpaceAssignmentPlanner.perWindowMatches(snapshot: snap.windows,
                                                               live: index.map(\.live))
         DiagnosticLog.write("restore-spaces", """
-            cross-Space index: source=\(source) windows=\(yabaiWindows.count) placeable=\(index.count) \
-            ax=\(axLive.count) scriptedApps=\(documentsByTitle.count) matched=\(matches.count) \
+            cross-Space index: source=\(source) windows=\(yabaiWindows.count) untracked=\(untracked) \
+            titledByYabai=\(yabaiTitles.count) \
+            placeable=\(index.count) \
+            ax=\(axLive.count) scriptedApps=\(documentsByTitle.count) browserDocs=\(browserDocs) matched=\(matches.count) \
             captured=\(snap.windows.count)
             """)
 
@@ -1097,7 +1132,7 @@ public final class AppLifecycle {
                 .map { $0.components(separatedBy: ".").last ?? $0 }.prefix(5).joined(separator: ", ")
             notes.append("\(unmatched.count) window(s) had no captured match (\(apps)"
                 + (unmatched.count > 5 ? ", …" : "") + ")"
-                + (statusModel.deepIdentityEnabled ? "." : "; turn on deep identity in Settings to match browser and Finder windows on other Spaces."))
+                + (statusModel.deepIdentityEnabled ? "." : "; turn on deep identity in Settings to match browser windows on other Spaces."))
         }
         statusModel.lastError = notes.isEmpty ? nil : notes.joined(separator: " ")
 
@@ -1312,6 +1347,10 @@ public final class AppLifecycle {
                 + "The system reported Desktop \(reported + 1) but the windows were on Desktop \(observed + 1). "
                 + "Wait a second after switching Spaces, then capture again."
         }
+        if case SnapshotEngine.CaptureError.spaceLeftBeforeCaptureFinished(let requested, _) = error {
+            return "You left Desktop \(requested + 1) before its capture finished, so nothing was saved. "
+                + "Go back to Desktop \(requested + 1), capture again, and stay there a few seconds."
+        }
         if let axError = error as? AXClient.AXError {
             switch axError {
             case .permissionDenied:
@@ -1381,15 +1420,21 @@ public final class AXRestorerBackend: RestorerBackend, @unchecked Sendable {
         limitToBundleIDs: Set<String>? = nil
     ) async throws -> ([LiveWindow], [AXKey: AXWindow]) {
         let axWindows = try await axClient.enumerateWindows(limitToBundleIDs: limitToBundleIDs)
+            .filter { !ExcludedApps.contains($0.bundleID) }
         let displays = displayEnumerator.enumerate()
         let resolver = WindowIdentityResolver.defaultV1()
 
+        // Same fetch as capture: title-joined where the app supports it.
         var deepByBundle: [String: [Int: WindowIdentity]] = [:]
+        var documentsByTitle: [String: [String: URL]] = [:]
         if useDeepIdentity {
-            let scriptedBundleIDs = Set(axWindows.map(\.bundleID))
-                .filter { DeepIdentityFetcher.isScripted(bundleID: $0) }
-            for bundleID in scriptedBundleIDs {
-                if let result = await deepIdentityFetcher.identitiesForApp(bundleID: bundleID) {
+            for bundleID in Set(axWindows.map(\.bundleID)) {
+                if DeepIdentityFetcher.reportsDocumentsByTitle(bundleID: bundleID) {
+                    if let docs = await deepIdentityFetcher.documentsByTitle(bundleID: bundleID) {
+                        documentsByTitle[bundleID] = docs
+                    }
+                } else if DeepIdentityFetcher.isScripted(bundleID: bundleID),
+                          let result = await deepIdentityFetcher.identitiesForApp(bundleID: bundleID) {
                     deepByBundle[bundleID] = result
                 }
             }
@@ -1404,12 +1449,19 @@ public final class AXRestorerBackend: RestorerBackend, @unchecked Sendable {
                 .max(by: {
                     intersectionArea($0.bounds, frame) < intersectionArea($1.bounds, frame)
                 })?.fingerprint.id ?? (displays.first?.fingerprint.id ?? "")
-            let appProviderIdentity = deepByBundle[axw.bundleID]?[axw.indexInApp]
+            let deep = DeepIdentityFetcher.signalInputs(
+                bundleID: axw.bundleID,
+                indexInApp: axw.indexInApp,
+                title: axw.title,
+                axDocumentURL: axw.documentURL,
+                identitiesByIndex: deepByBundle,
+                documentsByTitle: documentsByTitle
+            )
             let identity = resolver.resolve(WindowSignal(
                 bundleID: axw.bundleID,
                 title: axw.title,
-                documentURL: axw.documentURL,
-                appProviderIdentity: appProviderIdentity,
+                documentURL: deep.documentURL,
+                appProviderIdentity: deep.appProviderIdentity,
                 creationOrdinal: axw.creationOrdinal
             ))
             // CGWindowID enables per-window Space relocation (ADR-0002) and

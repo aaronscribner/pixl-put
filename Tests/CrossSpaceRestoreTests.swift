@@ -195,25 +195,16 @@ final class CrossSpaceRestoreTests: XCTestCase {
         XCTAssertNil(docs["Dup"], "one title, two documents: unresolvable")
     }
 
-    func test_finderFolders_becomeDocumentPathIdentities() {
-        let ids = ScriptRegistry.folderIdentities(fromPaths: ["/Users/me/Downloads/", "", "/tmp"])
-        XCTAssertEqual(ids[0], .documentPath(URL(fileURLWithPath: "/Users/me/Downloads/").standardizedFileURL))
-        XCTAssertNil(ids[1])
-        XCTAssertEqual(ids[2], .documentPath(URL(fileURLWithPath: "/tmp").standardizedFileURL))
-    }
-
-    func test_finderIsScripted_andReportsDocumentsByTitle() {
-        XCTAssertTrue(DeepIdentityFetcher.isScripted(bundleID: "com.apple.finder"))
-        XCTAssertTrue(DeepIdentityFetcher.reportsDocumentsByTitle(bundleID: "com.apple.finder"))
+    func test_browsersReportDocumentsByTitle() {
         XCTAssertTrue(DeepIdentityFetcher.reportsDocumentsByTitle(bundleID: "com.brave.Browser"))
         XCTAssertFalse(DeepIdentityFetcher.reportsDocumentsByTitle(bundleID: "com.apple.Stickies"))
     }
 
-    func test_passthrough_acceptsFinderFolderIdentity_butNotTitleOrOrdinal() {
+    func test_passthrough_acceptsLayerOneIdentity_butNotTitleOrOrdinal() {
         let folder = WindowIdentity.documentPath(URL(fileURLWithPath: "/Users/me/Downloads"))
         let resolver = WindowIdentityResolver.defaultV1()
         let resolved = resolver.resolve(WindowSignal(
-            bundleID: "com.apple.finder", title: "Downloads", documentURL: nil,
+            bundleID: "com.example.app", title: "Downloads", documentURL: nil,
             appProviderIdentity: folder, creationOrdinal: 4))
         XCTAssertEqual(resolved, folder)
 

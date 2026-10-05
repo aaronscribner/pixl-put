@@ -4,9 +4,18 @@ import Foundation
 /// configuration, Space)** — under `~/Library/Application Support/DisplayMaid-Next/snapshots/`.
 /// Rotation caps history at `historyLimit` per Space.
 ///
-/// File layout:
-///   snapshots/<configID>.space<N>.plist       — Space N's current snapshot
-///   snapshots/<configID>.space<N>.<slot>.plist — Space N's history, slot=1..historyLimit-1
+/// File layout, keyed by the Desktop's UUID rather than its position:
+///   snapshots/<configID>.space-<UUID>.plist        — that Desktop's current snapshot
+///   snapshots/<configID>.space-<UUID>.<slot>.plist — its history, slot=1..historyLimit-1
+///
+/// Callers still speak Space positions. The store translates through
+/// `spaceKeys` on every read and write, and rewrites each loaded entry's
+/// `spaceIndex` to the Desktop's position now. Positions shift whenever a
+/// Desktop is added, removed or reordered — measured 2026-09-14, a deleted and
+/// a newly created Desktop sent two Spaces' layouts to the wrong Desktops.
+/// Without Desktop UUIDs (no single managed Space set) files fall back to
+/// `<configID>.space<N>.plist`; those position-keyed files are ignored whenever
+/// UUIDs are available.
 ///
 /// **Why one file per Space?** A capture can only see the Space it is standing
 /// on: AX reports exactly the active Space's windows and nothing else (measured
@@ -29,6 +38,8 @@ import Foundation
 /// NOT a security measure — just less inspector-friendly to a casual user.
 public struct SnapshotStore: Sendable {
     public let directory: URL
+    /// Desktop UUIDs in Space order — see the file-layout note above.
+    public let spaceKeys: any SpaceKeying
 
     /// UserDefaults key for the total snapshot slot count (including the
     /// current slot 0). Settings UI writes this; the store reads it on
@@ -53,8 +64,9 @@ public struct SnapshotStore: Sendable {
     /// in modern Foundation, so we don't store it as a struct property.
     private var fileManager: FileManager { .default }
 
-    public init(directory: URL) {
+    public init(directory: URL, spaceKeys: any SpaceKeying = LiveSpaceKeys()) {
         self.directory = directory
+        self.spaceKeys = spaceKeys
     }
 
     public enum StoreError: Error, Equatable {
@@ -99,9 +111,10 @@ public struct SnapshotStore: Sendable {
 
         // Rotate existing files: N → N+1, dropping oldest when N+1 > limit.
         // Newest snapshot is the slot-0 file. Numbered files start at .1.
-        try rotateForward(configID: configID, spaceIndex: spaceIndex)
+        let key = spaceKey(for: spaceIndex)
+        try rotateForward(configID: configID, key: key)
 
-        let url = self.url(for: configID, spaceIndex: spaceIndex, slot: 0)
+        let url = self.url(for: configID, key: key, slot: 0)
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         do {
@@ -113,12 +126,12 @@ public struct SnapshotStore: Sendable {
     }
 
     /// Move current → .1, .1 → .2, … dropping the oldest file when it would exceed historyLimit-1.
-    private func rotateForward(configID: String, spaceIndex: Int) throws {
+    private func rotateForward(configID: String, key: String) throws {
         // Build list of existing slots (from highest backward), then rename
         // bottom-up so we never overwrite a file we still need to read.
         for slot in stride(from: historyLimit - 1, through: 0, by: -1) {
-            let src = url(for: configID, spaceIndex: spaceIndex, slot: slot)
-            let dst = url(for: configID, spaceIndex: spaceIndex, slot: slot + 1)
+            let src = url(for: configID, key: key, slot: slot)
+            let dst = url(for: configID, key: key, slot: slot + 1)
             guard fileManager.fileExists(atPath: src.path) else { continue }
             if slot + 1 >= historyLimit {
                 // Drops the would-be-oldest entry.
@@ -132,11 +145,21 @@ public struct SnapshotStore: Sendable {
         }
     }
 
-    private func url(for configID: String, spaceIndex: Int, slot: Int) -> URL {
+    /// The file-name key for a Space position: `space-<UUID>` for the Desktop
+    /// at that position when the window server reports Desktop UUIDs, else
+    /// `space<N>`. A position past the end of the Desktop list gets a key no
+    /// file has, so a stale position-keyed file can never answer for it.
+    func spaceKey(for spaceIndex: Int) -> String {
+        guard let uuids = spaceKeys.orderedSpaceUUIDs() else { return "space\(spaceIndex)" }
+        guard uuids.indices.contains(spaceIndex) else { return "space-none-\(spaceIndex)" }
+        return "space-\(uuids[spaceIndex])"
+    }
+
+    private func url(for configID: String, key: String, slot: Int) -> URL {
         if slot == 0 {
-            return directory.appendingPathComponent("\(configID).space\(spaceIndex).plist")
+            return directory.appendingPathComponent("\(configID).\(key).plist")
         }
-        return directory.appendingPathComponent("\(configID).space\(spaceIndex).\(slot).plist")
+        return directory.appendingPathComponent("\(configID).\(key).\(slot).plist")
     }
 
     // MARK: - Slot inspection (for the restore picker)
@@ -154,8 +177,9 @@ public struct SnapshotStore: Sendable {
 
     public func listHistory(forConfigurationID configID: String, spaceIndex: Int) -> [HistoryEntry] {
         var result: [HistoryEntry] = []
+        let key = spaceKey(for: spaceIndex)
         for slot in 0..<historyLimit {
-            let u = url(for: configID, spaceIndex: spaceIndex, slot: slot)
+            let u = url(for: configID, key: key, slot: slot)
             guard fileManager.fileExists(atPath: u.path) else { continue }
             // Cheap: just decode for the metadata we care about.
             guard let data = try? Data(contentsOf: u),
@@ -165,7 +189,7 @@ public struct SnapshotStore: Sendable {
             result.append(HistoryEntry(
                 slot: slot,
                 capturedAt: snap.capturedAt,
-                windowCount: snap.windows.count,
+                windowCount: ExcludedApps.removing(from: snap).windows.count,
                 url: u
             ))
         }
@@ -180,7 +204,7 @@ public struct SnapshotStore: Sendable {
 
     /// Permanently delete a specific slot.
     public func delete(forConfigurationID configID: String, spaceIndex: Int, slot: Int) {
-        let u = url(for: configID, spaceIndex: spaceIndex, slot: slot)
+        let u = url(for: configID, key: spaceKey(for: spaceIndex), slot: slot)
         try? fileManager.removeItem(at: u)
     }
 
@@ -188,6 +212,13 @@ public struct SnapshotStore: Sendable {
     /// configuration, ascending. Lets callers act on "all Spaces we know
     /// about" without assuming how many Spaces exist.
     public func spaceIndices(forConfigurationID configID: String) -> [Int] {
+        if let uuids = spaceKeys.orderedSpaceUUIDs() {
+            // Where the Desktops that have a layout are now. A deleted
+            // Desktop's layout is not listed.
+            return uuids.indices.filter { index in
+                fileManager.fileExists(atPath: url(for: configID, key: "space-\(uuids[index])", slot: 0).path)
+            }
+        }
         let names = (try? fileManager.contentsOfDirectory(atPath: directory.path)) ?? []
         let prefix = "\(configID).space"
         var found: Set<Int> = []
@@ -221,12 +252,12 @@ public struct SnapshotStore: Sendable {
     }
 
     private func loadFromSlot(configID: String, spaceIndex: Int, slot: Int) throws -> Snapshot? {
-        let url = self.url(for: configID, spaceIndex: spaceIndex, slot: slot)
+        let url = self.url(for: configID, key: spaceKey(for: spaceIndex), slot: slot)
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         let data: Data
         do { data = try Data(contentsOf: url) }
         catch { throw StoreError.readFailed(error.localizedDescription) }
-        return try decode(data)
+        return Self.placing(try decode(data), onSpace: spaceIndex)
     }
 
     private func decode(_ data: Data) throws -> Snapshot {
@@ -236,11 +267,34 @@ public struct SnapshotStore: Sendable {
             guard snapshot.schemaVersion == Snapshot.currentSchemaVersion else {
                 throw StoreError.unsupportedSchemaVersion(snapshot.schemaVersion)
             }
-            return snapshot
+            // Every restore path reads through here, so snapshots captured
+            // before an app was excluded lose its windows without a re-capture.
+            return ExcludedApps.removing(from: snapshot)
         } catch let error as StoreError {
             throw error
         } catch {
             throw StoreError.decodeFailed(error.localizedDescription)
         }
+    }
+
+    /// `snapshot` with every entry on `spaceIndex` — the Desktop's position
+    /// now, which differs from capture time when Desktops were added, removed
+    /// or reordered since. Cross-Space moves target this value.
+    static func placing(_ snapshot: Snapshot, onSpace spaceIndex: Int) -> Snapshot {
+        guard snapshot.windows.contains(where: { $0.spaceIndex != spaceIndex }) else { return snapshot }
+        let windows = snapshot.windows.map { e in
+            WindowEntry(
+                bundleID: e.bundleID, identity: e.identity, ordinalInApp: e.ordinalInApp,
+                displayFingerprintID: e.displayFingerprintID, spaceIndex: spaceIndex,
+                frame: e.frame, isMinimized: e.isMinimized, isFullscreen: e.isFullscreen,
+                capturedAt: e.capturedAt, windowID: e.windowID
+            )
+        }
+        return Snapshot(
+            id: snapshot.id, name: snapshot.name,
+            displayConfigurationID: snapshot.displayConfigurationID,
+            displays: snapshot.displays, capturedAt: snapshot.capturedAt,
+            trigger: snapshot.trigger, windows: windows
+        )
     }
 }

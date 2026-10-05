@@ -44,10 +44,11 @@ git submodule update --init --recursive
 # Run the test suite
 swift test
 
-# Build PixPut.app. This also builds vendor/yabai, signs it with the same
+# Build PixlPut.app. This also builds vendor/yabai, signs it with the same
 # Developer ID, and installs /Applications/Utilities/yabai.app (SKIP_YABAI=1 to skip).
+# It then runs scripts/install-app.sh: installs /Applications/PixlPut.app,
+# registers it to open at login, and relaunches it (SKIP_INSTALL=1 to skip).
 ./scripts/build-app.sh
-# → build/PixPut.app
 
 # One-time privileged yabai setup: sudoers rule for --load-sa, ~/.yabairc,
 # launch agent. Re-run after a yabai rebuild that changes the binary.
@@ -55,9 +56,8 @@ swift test
 # the Developer ID signature keeps that grant valid across rebuilds.
 ./scripts/setup-yabai.sh
 
-# Launch
-open build/PixPut.app
-# On first launch, grant Accessibility permission when prompted.
+# build-app.sh already launched /Applications/PixlPut.app; after that it
+# opens at every login. On first launch, grant Accessibility permission when prompted.
 # The menu bar icon (rectangle.on.rectangle) appears in the right side
 # of the menu bar. Click for the Capture / Restore / Settings menu.
 
