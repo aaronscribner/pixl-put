@@ -2,19 +2,20 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 <BaseLayout
-    title="Privacy — PixPut"
-    description="What PixPut does and does not collect. Short answer: nothing leaves your machine except license validation."
+    title="Privacy — PixlPut"
+    description="What PixlPut does and does not collect. Short answer: nothing about your windows leaves your Mac."
     path="/privacy"
 >
     <section class="prose container">
         <h1>Privacy</h1>
-        <p><strong>Short answer:</strong> nothing about your windows, files, or activity ever leaves your Mac. The only network call PixPut ever makes is license validation to <code>api.pixput.app</code>.</p>
+        <p><strong>Short answer:</strong> nothing about your windows, files, or activity ever leaves your Mac. PixlPut makes exactly two kinds of network call: license validation to <code>api.pixput.app</code> and update checks to <code>updates.pixput.app</code>.</p>
 
         <h2>What's stored locally</h2>
         <ul>
-            <li><strong>Snapshots</strong> — window positions, sizes, app bundle IDs, and (optionally) document URLs you opened. Lives in <code>~/Library/Application Support/PixPut/snapshots/</code>. Never transmitted.</li>
+            <li><strong>Snapshots</strong> — window positions, sizes, Desktops, app bundle IDs, and window titles. If you turn on per-app identity, also the browser tab, workspace or project each window shows. Stored in <code>~/Library/Application Support/DisplayMaid-Next/snapshots/</code>. Never transmitted.</li>
+            <li><strong>Space thumbnails</strong> — off by default. If you opt in, a JPEG of each Desktop is saved next to your snapshots. Never transmitted.</li>
             <li><strong>License + machine ID</strong> — your activation status, stored in Keychain. Machine ID is a one-way hash of your hardware UUID, useless outside our license database.</li>
-            <li><strong>Diagnostic log</strong> — a plain-text trace of capture/restore decisions, in <code>~/Library/Application Support/PixPut/logs/</code>. Replaced each launch. Never auto-sent.</li>
+            <li><strong>Diagnostic log</strong> — a plain-text trace of capture/restore decisions, in <code>~/Library/Application Support/DisplayMaid-Next/logs/</code>. Keeps the last three runs. Never auto-sent; you can attach it to a support email if you choose.</li>
         </ul>
 
         <h2>What's sent over the network</h2>
@@ -28,9 +29,9 @@ import BaseLayout from '../layouts/BaseLayout.astro';
         <p>Purchases are handled by Lemon Squeezy as merchant of record. We see only your email and order ID (used to issue your license). Their privacy policy: <a href="https://www.lemonsqueezy.com/privacy">lemonsqueezy.com/privacy</a>.</p>
 
         <h2>Data deletion</h2>
-        <p>Delete the snapshots folder above to remove all local data. Click "Deactivate" in PixPut → License… to release your activation slot and wipe your local license. Email <a href="mailto:support@pixput.app">support@pixput.app</a> if you want your license record fully purged from our database.</p>
+        <p>Delete the snapshots folder above to remove all local data. Click "Deactivate" in PixlPut → License… to release your activation slot and wipe your local license. Email <a href="mailto:support@pixput.app">support@pixput.app</a> if you want your license record fully purged from our database.</p>
 
-        <p class="updated">Last updated: 2026-05-30</p>
+        <p class="updated">Last updated: 2026-10-01</p>
     </section>
 </BaseLayout>
 

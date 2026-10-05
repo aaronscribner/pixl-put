@@ -2,17 +2,24 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 ---
 <BaseLayout
-    title="Changelog — PixPut"
-    description="Release notes for PixPut."
+    title="Changelog — PixlPut"
+    description="Release notes for PixlPut."
     path="/changelog"
 >
     <section class="prose container">
         <h1>Changelog</h1>
 
         <article>
-            <h2>0.1 — in development</h2>
+            <h2>1.1 — Launch</h2>
             <ul>
-                <li>Initial release.</li>
+                <li>Restore after a restart: PixlPut waits for your apps to relaunch, then puts every window back on its Desktop and position.</li>
+                <li>Layouts follow their Desktop. Adding, removing or reordering Desktops no longer applies a layout to the wrong one.</li>
+                <li>Restores windows on every Desktop, not just the one on screen.</li>
+                <li>Browser windows on other Desktops are matched by their active tab.</li>
+                <li>Finder is left alone. macOS already reopens Finder windows where they were.</li>
+                <li>Popups and panels are no longer saved as windows.</li>
+                <li>Capture always saves the Desktop you clicked it on.</li>
+                <li>Much faster window scanning.</li>
             </ul>
         </article>
     </section>

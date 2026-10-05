@@ -4,7 +4,7 @@ import BaseLayout from '../layouts/BaseLayout.astro';
 const structuredData = {
     '@context': 'https://schema.org',
     '@type': 'SoftwareApplication',
-    name: 'PixPut',
+    name: 'PixlPut',
     applicationCategory: 'UtilityApplication',
     operatingSystem: 'macOS 14+',
     offers: {
@@ -13,55 +13,55 @@ const structuredData = {
         priceCurrency: 'USD',
         availability: 'https://schema.org/InStock',
     },
-    description: 'PixPut remembers where every window was — and puts each one back. Survives sleep, wake, and display changes on macOS.',
-    softwareVersion: '0.1',
+    description: 'PixlPut remembers where every window was, on every Desktop, and puts each one back after sleep, wake, display changes and restarts.',
+    softwareVersion: '1.0.3',
 };
 ---
 <BaseLayout
-    title="PixPut — Window memory for macOS"
-    description="PixPut remembers where every window was — and puts each one back. Survives sleep, wake, and display reconfiguration. No off-device data."
+    title="PixlPut — Window memory for macOS"
+    description="PixlPut remembers where every window was, on every Desktop, and puts each one back after sleep, wake, display changes and restarts. Your layouts never leave your Mac."
     path="/"
     structuredData={structuredData}
 >
     <section class="hero container">
         <h1>Your windows. Where you left them.</h1>
         <p class="lede">
-            Sleep, wake, plug in a monitor, unplug, switch Spaces — macOS scatters your carefully-arranged windows.
-            PixPut quietly remembers every position and puts each one back. No clicks. No re-arranging. No data leaves your Mac.
+            Sleep, wake, lock, restart: macOS scatters your carefully arranged windows across the wrong Desktops and the wrong corners.
+            PixlPut remembers where each one belongs and puts it back. Arrange once, capture once, stop rearranging.
         </p>
         <div class="cta-row">
-            <a href="/buy" class="btn btn-primary">Get PixPut · $19 one-time</a>
+            <a href="/buy" class="btn btn-primary">Get PixlPut · $19 one-time</a>
             <a href="#features" class="btn btn-secondary">See features</a>
         </div>
-        <p class="micro">14-day trial · No account · Works offline · Apple-signed and notarized</p>
+        <p class="micro">14-day free trial · No account · Developer ID signed and notarized · macOS 14 or later</p>
     </section>
 
     <section id="features" class="features container">
-        <h2>What PixPut does</h2>
+        <h2>What PixlPut does</h2>
         <div class="grid">
             <article>
                 <h3>Survives sleep &amp; wake</h3>
-                <p>macOS herds your windows onto the laptop screen during sleep. PixPut snaps them back the moment you wake.</p>
+                <p>Waking from sleep, waking the displays, unlocking, a display change: PixlPut puts your windows back on their own. Windows already in place aren't touched.</p>
             </article>
             <article>
-                <h3>Per-Space layouts</h3>
-                <p>Every Mission Control Space gets its own remembered arrangement. Visit a Space and it auto-captures.</p>
+                <h3>Every Desktop, remembered</h3>
+                <p>Each Mission Control Desktop keeps its own layout. Add, remove or reorder Desktops and each layout stays with the Desktop it belongs to.</p>
             </article>
             <article>
-                <h3>Multi-monitor aware</h3>
-                <p>Tracks each display by hardware fingerprint, so docking and undocking restores the right layout — every time.</p>
+                <h3>Back after a restart</h3>
+                <p>After a reboot, PixlPut waits for your apps to finish relaunching, then returns every window to its Desktop and position, including apps that open late.</p>
+            </article>
+            <article>
+                <h3>Knows which window is which</h3>
+                <p>Three browser windows, four VS Code projects? Optional per-app identity matches each window by its tab, workspace or project, so each one returns to its own spot.</p>
+            </article>
+            <article>
+                <h3>You decide what's saved</h3>
+                <p>Your layout changes only when you click Capture. Move a window afterwards and it stays put until the next wake. Snapshot history lets you go back to an earlier layout.</p>
             </article>
             <article>
                 <h3>Local-only by design</h3>
-                <p>Snapshots live in your Library. No telemetry, no analytics, no cloud sync. The only network call is license validation.</p>
-            </article>
-            <article>
-                <h3>Cross-Space capture</h3>
-                <p>Every time you switch Spaces, the previous one's layout is captured silently. After one normal workday, every Space is covered.</p>
-            </article>
-            <article>
-                <h3>Identity-aware restore</h3>
-                <p>Optional per-app deep identity (off by default) means Brave tabs and VSCode workspaces always go back to the right window.</p>
+                <p>Layouts live in your Library. No telemetry, no analytics, no cloud sync. The only network calls are license checks and update checks.</p>
             </article>
         </div>
     </section>
@@ -69,27 +69,51 @@ const structuredData = {
     <section id="how" class="how container">
         <h2>How it works</h2>
         <ol>
-            <li><strong>Capture.</strong> PixPut snapshots every window's position, size, and which Space &amp; display it's on.</li>
-            <li><strong>Watch.</strong> Sleep, wake, dock, undock, lock — any event that scatters your windows, PixPut sees.</li>
-            <li><strong>Restore.</strong> Windows snap back to their last-known positions in milliseconds.</li>
+            <li><strong>Arrange.</strong> Lay out your windows the way you like them, on as many Desktops as you use.</li>
+            <li><strong>Capture.</strong> Click Capture now in the menu bar. PixlPut saves each window's position, size and Desktop.</li>
+            <li><strong>Forget about it.</strong> After sleep, wake, a display change or a restart, PixlPut puts everything back. The Desktop on screen is restored right away, and every other Desktop the first time you visit it.</li>
         </ol>
-        <p class="aside">Built around Apple's Accessibility API. Code-signed with Developer ID and notarized — Gatekeeper-clean out of the gate.</p>
+        <p class="aside">Built on Apple's Accessibility API. Signed with a Developer ID and notarized by Apple, so Gatekeeper opens it without warnings.</p>
     </section>
 
     <section id="pricing" class="pricing container">
         <h2>One price. No subscription.</h2>
         <div class="plan">
             <div class="price">$19</div>
-            <div class="meta">One-time · 3 devices · Free updates for 1 year</div>
+            <div class="meta">One-time · 3 Macs · Free updates for 1 year</div>
             <ul>
-                <li>Capture &amp; restore on sleep, wake, lock, display change</li>
-                <li>Per-Space and multi-monitor support</li>
+                <li>Restore on sleep, wake, unlock, display change and restart</li>
+                <li>Separate layouts for every Desktop, plus snapshot history</li>
                 <li>14-day full-featured trial</li>
-                <li>Apple Developer-ID signed &amp; notarized</li>
+                <li>Developer ID signed &amp; notarized</li>
                 <li>Email support, refund within 30 days</li>
             </ul>
-            <a href="/buy" class="btn btn-primary">Get PixPut</a>
+            <a href="/buy" class="btn btn-primary">Get PixlPut</a>
         </div>
+    </section>
+
+    <section id="faq" class="faq container">
+        <h2>Questions</h2>
+        <details>
+            <summary>What does PixlPut need to run?</summary>
+            <p>macOS 14 Sonoma or later, and the Accessibility permission, which PixlPut asks for on first launch. macOS requires that permission for any app that moves other apps' windows.</p>
+        </details>
+        <details>
+            <summary>Can it move windows back to a different Desktop?</summary>
+            <p>Yes, with <a href="https://github.com/asmvik/yabai">yabai</a> installed. macOS doesn't let one app move another app's window to a different Desktop, and yabai is the open-source tool that can. Its scripting addition needs System Integrity Protection partially disabled. Without yabai, PixlPut still restores every window's position and size on each Desktop. Windows that macOS moved to the wrong Desktop stay there, and restore after a restart relies on yabai.</p>
+        </details>
+        <details>
+            <summary>Will it ask to control my browser?</summary>
+            <p>Only if you turn on "Identify individual browser/editor windows" in Settings. It's off by default, and while it's off PixlPut never asks for Automation permission for any other app.</p>
+        </details>
+        <details>
+            <summary>Does it take screenshots?</summary>
+            <p>Only if you opt in. Space thumbnails help you recognize saved layouts. They're off by default, need explicit consent, and are stored on your Mac only.</p>
+        </details>
+        <details>
+            <summary>What happens when the trial ends?</summary>
+            <p>Capture and restore pause until you enter a license key. Your saved layouts stay on your Mac, ready for when you do.</p>
+        </details>
     </section>
 </BaseLayout>
 
@@ -127,7 +151,7 @@ const structuredData = {
     .features {
         padding: 80px 0;
     }
-    .features h2, .how h2, .pricing h2 {
+    .features h2, .how h2, .pricing h2, .faq h2 {
         font-size: 32px;
         font-weight: 700;
         letter-spacing: -0.02em;
@@ -213,4 +237,24 @@ const structuredData = {
         font-size: 14px;
     }
     .plan li:last-child { border-bottom: none; }
+
+    .faq {
+        padding: 64px 0;
+        max-width: 760px;
+    }
+    .faq details {
+        border-bottom: 1px solid var(--border);
+        padding: 18px 0;
+    }
+    .faq summary {
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 16px;
+    }
+    .faq details p {
+        margin-top: 12px;
+        color: var(--text-dim);
+        font-size: 15px;
+        line-height: 1.6;
+    }
 </style>

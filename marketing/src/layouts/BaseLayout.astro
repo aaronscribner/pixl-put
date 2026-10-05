@@ -39,7 +39,7 @@ const ogImageAbs = new URL(ogImage, Astro.site).toString();
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />
     <meta property="og:image" content={ogImageAbs} />
-    <meta property="og:site_name" content="PixPut" />
+    <meta property="og:site_name" content="PixlPut" />
 
     <!-- Twitter -->
     <meta name="twitter:card" content="summary_large_image" />
@@ -150,11 +150,12 @@ const ogImageAbs = new URL(ogImage, Astro.site).toString();
 <body>
     <header class="container">
         <nav class="site">
-            <a href="/" class="brand">PixPut</a>
+            <a href="/" class="brand">PixlPut</a>
             <ul>
                 <li><a href="/#features">Features</a></li>
                 <li><a href="/#how">How it works</a></li>
                 <li><a href="/#pricing">Pricing</a></li>
+                <li><a href="/#faq">FAQ</a></li>
                 <li><a href="/buy" class="btn-buy">Buy</a></li>
             </ul>
         </nav>
@@ -167,10 +168,10 @@ const ogImageAbs = new URL(ogImage, Astro.site).toString();
     <footer class="site container">
         <div class="row">
             <div>
-                © {new Date().getFullYear()} Cerebral Juice Co. PixPut is a macOS utility.
+                © {new Date().getFullYear()} Cerebral Juice Co. PixlPut is a macOS utility.
             </div>
             <div>
-                <a href="/privacy">Privacy</a> · <a href="/changelog">Changelog</a> · <a href="https://github.com/cerebraljuice/pixput">GitHub</a>
+                <a href="/privacy">Privacy</a> · <a href="/changelog">Changelog</a> · <a href="mailto:support@pixput.app">Support</a>
             </div>
         </div>
     </footer>
