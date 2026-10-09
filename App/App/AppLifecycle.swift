@@ -43,7 +43,6 @@ public final class AppLifecycle {
     /// user believed Desktops 4 and 5 were captured for a full day (2026-08-12).
     /// Failures the user is standing right in front of must announce themselves.
     public var onUserActionFailed: ((String) -> Void)?
-    public let licenseValidator: LicenseValidator
     public let thumbnailStore: ThumbnailStore
 
     private let restorerBackend: AXRestorerBackend
@@ -66,34 +65,6 @@ public final class AppLifecycle {
     /// snapshot and yank windows back to the layout the user just replaced
     /// (measured 2026-08-06 18:13:37 — capture and stale restore 3ms apart).
     private var pendingSpaceRestoreTask: Task<Void, Never>?
-
-    /// True when the bundled Ed25519 public key is still the placeholder —
-    /// i.e., licensing isn't actually configured for this build. In that
-    /// case `LicenseVerifier.verify` always fails, derived state would be
-    /// `hardExpired(.revoked)` or `noLicense`, and gating on
-    /// `state.allowsAutoFeatures` would block every feature in a dev
-    /// build. Detect that and bypass the gates until a real key is pasted.
-    /// Production builds (with a real public key) get the strict gates.
-    private var isLicensingUnconfigured: Bool {
-        LicenseVerifier.publicKeyB64 == "PLACEHOLDER_REPLACE_WITH_GENERATED_KEY"
-    }
-
-    /// Auto-features (capture on idle, restore on wake, Space-switch capture,
-    /// restore-on-startup) gated on license state. Once licensing is wired,
-    /// expired/revoked/trial-expired states quietly stop auto-doing things;
-    /// the user can still manually capture / restore while in `graceOverdue`.
-    private var allowsAutoFeatures: Bool {
-        if isLicensingUnconfigured { return true }
-        return licenseValidator.state.allowsAutoFeatures
-    }
-
-    /// Manual features (Capture Now, Restore Now) — slightly more permissive
-    /// than auto features: also enabled in `graceOverdue` so a user with a
-    /// network outage can still operate the app.
-    private var allowsManualFeatures: Bool {
-        if isLicensingUnconfigured { return true }
-        return licenseValidator.state.allowsManualFeatures
-    }
 
     public init() throws {
         self.paths = Paths()
@@ -123,20 +94,9 @@ public final class AppLifecycle {
         self.restorer = Restorer(backend: backend, tolerancePoints: 1.0)
 
         self.statusModel = MenuBarStatusModel()
-        self.licenseValidator = LicenseValidator()
         self.thumbnailStore = ThumbnailStore(directory: paths.snapshots)
 
         let statusModel = self.statusModel
-        // Capture validator + public key for the closure-based gates
-        // below. These run inside Debouncer closures which can't capture
-        // `self` yet (init isn't complete), so we close over the concrete
-        // references we need.
-        let validatorRef = self.licenseValidator
-        let isPlaceholderKey = (LicenseVerifier.publicKeyB64 == "PLACEHOLDER_REPLACE_WITH_GENERATED_KEY")
-        let licenseGate: @MainActor @Sendable () -> Bool = {
-            if isPlaceholderKey { return true }
-            return validatorRef.state.allowsAutoFeatures
-        }
         let engine = self.snapshotEngine
         let restorerLocal = self.restorer
         let store = self.snapshotStore
@@ -159,11 +119,6 @@ public final class AppLifecycle {
                     DiagnosticLog.write("capture",
                         "SKIP: screen is locked — declining auto-capture trigger")
                     logger.log(.info, "Skipped auto-capture: screen is locked")
-                    return
-                }
-                guard licenseGate() else {
-                    DiagnosticLog.write("capture",
-                        "SKIP auto-capture: license state blocks auto features")
                     return
                 }
                 do {
@@ -195,11 +150,6 @@ public final class AppLifecycle {
                 if isScreenLockedNow() {
                     DiagnosticLog.write("restore",
                         "SKIP wake-restore: screen is locked, will rely on Space-switch restore after unlock")
-                    return
-                }
-                guard licenseGate() else {
-                    DiagnosticLog.write("restore",
-                        "SKIP wake-restore: license state blocks auto features")
                     return
                 }
                 do {
@@ -327,27 +277,6 @@ public final class AppLifecycle {
             DiagnosticLog.write("startup", "fresh boot: restore-after-restart disabled by setting")
         }
 
-        // Licensing: start the validator. It refreshes local state from
-        // Keychain, kicks off a /validate phone-home if a license is
-        // stored, and runs a periodic re-validation loop. State changes
-        // are exposed via `licenseValidator.statePublisher` — the paywall
-        // window subscribes to that, and feature gates check
-        // `state.allowsAutoFeatures` / `allowsManualFeatures`. We do NOT
-        // gate features yet (paywall UI not wired) — the validator runs
-        // observably while the rest of the integration lands.
-        licenseValidator.start()
-        // First-launch convenience: if no license is stored AND no trial
-        // has been started, auto-request a trial. The server returns a
-        // signed 14-day window. If offline, this silently fails and the
-        // app stays in `noLicense` until the next launch.
-        Task { @MainActor [weak self] in
-            guard let self = self else { return }
-            if LicenseKeychain.loadSignedLicense() == nil
-                && LicenseKeychain.loadTrialExpiresAt() == nil {
-                _ = try? await self.licenseValidator.startTrial()
-            }
-        }
-
         // Phase A — subscribe to active-Space changes. Each change updates
         // `eventLog.spaceLastVisitedAt[newSpace]`. Phase D will hook in
         // here to dispatch the lazy restore when appropriate.
@@ -389,11 +318,6 @@ public final class AppLifecycle {
             if isScreenLockedNow() {
                 DiagnosticLog.write("startup",
                     "SKIP restore-on-startup: screen is locked")
-                return
-            }
-            guard self.allowsAutoFeatures else {
-                DiagnosticLog.write("startup",
-                    "SKIP restore-on-startup: license state blocks auto features")
                 return
             }
             let configID = enumeratorStart.configurationID()
@@ -466,16 +390,6 @@ public final class AppLifecycle {
         eventLog.recordSpaceVisit(spaceIndex: spaceIndex)
         LoggerRegistry.app.log(.info,
             "Space changed to index=\(spaceIndex); previously visited=\(previouslyVisited?.description ?? "never"); gateOpen=\(gateOpen); will-restore=\(shouldRestore)")
-
-        // License gate. If the state blocks auto features (expired/revoked
-        // license, trial expired), skip the Space-switch restore — the only
-        // path that still runs is manual Capture/Restore (and only those if
-        // `allowsManualFeatures`).
-        guard allowsAutoFeatures else {
-            DiagnosticLog.write("restore",
-                "SKIP Space-switch restore for space=\(spaceIndex): license state blocks auto features")
-            return
-        }
 
         // Every skip writes to the diagnostic log. The first wake-gate era
         // skipped silently, which cost a debugging session: "restore didn't
@@ -654,7 +568,6 @@ public final class AppLifecycle {
     public func stop() {
         idleWatcher.stop()
         wakeWatcher.stop()
-        licenseValidator.stop()
         pendingSpaceCaptureTask?.cancel()
         pendingSpaceCaptureTask = nil
         pendingSpaceRestoreTask?.cancel()
@@ -671,11 +584,6 @@ public final class AppLifecycle {
         // whichever one the user is on when the enumeration completes.
         let requestedSpace = spaceResolver.activeSpaceIndex()
         Task { @MainActor in
-            guard allowsManualFeatures else {
-                statusModel.lastError = "License required. Open menu bar → License… to activate or start a trial."
-                DiagnosticLog.write("capture", "BLOCKED manual capture: license state = \(licenseValidator.state)")
-                return
-            }
             // Capture declares the CURRENT layout authoritative. A restore
             // scheduled by the Space switch the user made moments ago must
             // not fire mid-capture (moving windows while frames are being
@@ -720,11 +628,6 @@ public final class AppLifecycle {
 
     public func restoreNow() {
         Task { @MainActor in
-            guard allowsManualFeatures else {
-                statusModel.lastError = "License required. Open menu bar → License… to activate or start a trial."
-                DiagnosticLog.write("restore", "BLOCKED manual restore: license state = \(licenseValidator.state)")
-                return
-            }
             do {
                 let configID = displayEnumerator.configurationID()
                 // Read the index ONCE, verified. This used to be read twice —
@@ -817,12 +720,6 @@ public final class AppLifecycle {
     /// nothing" can always explain itself.
     @discardableResult
     func performRestoreSpaces(trigger: RestoreSpacesTrigger) async -> Bool {
-        let licensed = trigger == .manual ? allowsManualFeatures : allowsAutoFeatures
-        guard licensed else {
-            statusModel.lastError = "License required. Open menu bar → License… to activate or start a trial."
-            DiagnosticLog.write("restore-spaces", "BLOCKED: license state = \(licenseValidator.state)")
-            return false
-        }
         guard spaceResolver.canRelocateAcrossSpaces else {
             statusModel.lastError = "This macOS doesn't expose the Space-relocation API. "
                 + "Windows can still be restored to their display and frame via Restore now."
@@ -1342,10 +1239,6 @@ public final class AppLifecycle {
     /// Used by the Restore Picker UI.
     public func restoreFromSlot(_ slot: Int) {
         Task { @MainActor in
-            guard allowsManualFeatures else {
-                statusModel.lastError = "License required. Open menu bar → License…"
-                return
-            }
             do {
                 let configID = displayEnumerator.configurationID()
                 let pickerSpace = await spaceResolver.settledActiveSpaceIndex { reported, observed in

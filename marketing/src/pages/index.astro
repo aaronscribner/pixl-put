@@ -7,12 +7,6 @@ const structuredData = {
     name: 'PixlPut',
     applicationCategory: 'UtilityApplication',
     operatingSystem: 'macOS 14+',
-    offers: {
-        '@type': 'Offer',
-        price: '19',
-        priceCurrency: 'USD',
-        availability: 'https://schema.org/InStock',
-    },
     description: 'PixlPut remembers where every window was, on every Desktop, and puts each one back after sleep, wake, display changes and restarts.',
     softwareVersion: '1.0.3',
 };
@@ -30,10 +24,9 @@ const structuredData = {
             PixlPut remembers where each one belongs and puts it back. Arrange once, capture once, stop rearranging.
         </p>
         <div class="cta-row">
-            <a href="/buy" class="btn btn-primary">Get PixlPut · $19 one-time</a>
-            <a href="#features" class="btn btn-secondary">See features</a>
+            <a href="#features" class="btn btn-primary">See features</a>
         </div>
-        <p class="micro">14-day free trial · No account · Developer ID signed and notarized · macOS 14 or later</p>
+        <p class="micro">Free and open source · No account · Developer ID signed and notarized · macOS 14 or later</p>
     </section>
 
     <section id="features" class="features container">
@@ -61,7 +54,7 @@ const structuredData = {
             </article>
             <article>
                 <h3>Local-only by design</h3>
-                <p>Layouts live in your Library. No telemetry, no analytics, no cloud sync. The only network calls are license checks and update checks.</p>
+                <p>Layouts live in your Library. No telemetry, no analytics, no cloud sync. The only network call is the update check.</p>
             </article>
         </div>
     </section>
@@ -74,22 +67,6 @@ const structuredData = {
             <li><strong>Forget about it.</strong> After sleep, wake, a display change or a restart, PixlPut puts everything back. The Desktop on screen is restored right away, and every other Desktop the first time you visit it.</li>
         </ol>
         <p class="aside">Built on Apple's Accessibility API. Signed with a Developer ID and notarized by Apple, so Gatekeeper opens it without warnings.</p>
-    </section>
-
-    <section id="pricing" class="pricing container">
-        <h2>One price. No subscription.</h2>
-        <div class="plan">
-            <div class="price">$19</div>
-            <div class="meta">One-time · 3 Macs · Free updates for 1 year</div>
-            <ul>
-                <li>Restore on sleep, wake, unlock, display change and restart</li>
-                <li>Separate layouts for every Desktop, plus snapshot history</li>
-                <li>14-day full-featured trial</li>
-                <li>Developer ID signed &amp; notarized</li>
-                <li>Email support, refund within 30 days</li>
-            </ul>
-            <a href="/buy" class="btn btn-primary">Get PixlPut</a>
-        </div>
     </section>
 
     <section id="faq" class="faq container">
@@ -109,10 +86,6 @@ const structuredData = {
         <details>
             <summary>Does it take screenshots?</summary>
             <p>Only if you opt in. Space thumbnails help you recognize saved layouts. They're off by default, need explicit consent, and are stored on your Mac only.</p>
-        </details>
-        <details>
-            <summary>What happens when the trial ends?</summary>
-            <p>Capture and restore pause until you enter a license key. Your saved layouts stay on your Mac, ready for when you do.</p>
         </details>
     </section>
 </BaseLayout>
@@ -151,7 +124,7 @@ const structuredData = {
     .features {
         padding: 80px 0;
     }
-    .features h2, .how h2, .pricing h2, .faq h2 {
+    .features h2, .how h2, .faq h2 {
         font-size: 32px;
         font-weight: 700;
         letter-spacing: -0.02em;
@@ -203,40 +176,6 @@ const structuredData = {
         font-size: 14px;
     }
 
-    .pricing {
-        padding: 80px 0;
-    }
-    .plan {
-        max-width: 480px;
-        margin: 0 auto;
-        background: var(--surface);
-        border: 1px solid var(--border);
-        border-radius: 16px;
-        padding: 32px;
-        text-align: center;
-    }
-    .plan .price {
-        font-size: 56px;
-        font-weight: 700;
-        letter-spacing: -0.02em;
-    }
-    .plan .meta {
-        color: var(--text-dim);
-        margin-bottom: 24px;
-    }
-    .plan ul {
-        list-style: none;
-        text-align: left;
-        margin: 0 0 28px;
-        padding: 0;
-    }
-    .plan li {
-        padding: 8px 0;
-        color: var(--text-dim);
-        border-bottom: 1px solid var(--border);
-        font-size: 14px;
-    }
-    .plan li:last-child { border-bottom: none; }
 
     .faq {
         padding: 64px 0;

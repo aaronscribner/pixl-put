@@ -44,19 +44,12 @@ user's machine. No telemetry. No analytics. No cloud sync (a future export
 feature, if any, is user-initiated and writes a file the user controls).
 Crash reports are local files the user can choose to attach to a bug report.
 
-**Allowed off-device endpoints** (exhaustive list — any new endpoint requires
+**Allowed off-device endpoint** (exhaustive list — any new endpoint requires
 amending this principle):
 
 1. **Sparkle appcast** at `https://updates.pixput.app/appcast.xml` — fetched
    on a schedule to check for new releases. Sends only `User-Agent`. No
    identifying data.
-2. **License API** at `https://api.pixput.app` — `/v1/activate`,
-   `/v1/validate`, `/v1/deactivate`, `/v1/trial/start`. Request payload is
-   limited to: license key (or trial-start signal), hashed machine ID
-   (`SHA256(IOPlatformUUID + bundle + salt)`), app version, random nonce.
-   Server replies are Ed25519-signed so MitM cannot forge a "valid" reply.
-   No window data, no snapshot data, no document URLs, no email beyond what
-   the customer enters on the marketing site at purchase time.
 
 Any other off-device call is a violation — including ostensibly innocuous
 ones (font CDNs, analytics, error reporting, "phone home for available
@@ -109,10 +102,13 @@ Complexity Tracking table documents:
 2. Why the simpler/principled path was rejected.
 3. A specific revisit trigger (e.g. "revisit if X happens").
 
-**Version**: 1.1.0 | **Ratified**: 2026-05-23 | **Last Amended**: 2026-05-30
+**Version**: 1.2.0 | **Ratified**: 2026-05-23 | **Last Amended**: 2026-10-08
 
 ## Changelog
 
+- **1.2.0** (2026-10-08): §IV — removed the license API endpoint. The
+  project is open source and has no licensing; the Sparkle appcast is the
+  only permitted external endpoint.
 - **1.1.0** (2026-05-30): §IV — added exhaustive "Allowed off-device endpoints"
   list. Sparkle appcast and license API (`api.pixput.app`) are the only
   permitted external endpoints; new ones require an amendment.

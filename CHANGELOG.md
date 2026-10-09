@@ -29,6 +29,9 @@ traced back to a commit.
 - The restore message says why windows were left alone: "couldn't tell these windows apart" (with app names and counts) or "not in your saved layout", instead of "N window(s) had no captured match". The diagnostic log records each unmatched app by reason and how every match was made (`matched by windowID|identity|title|sole-window`).
 - Settings → "How windows are recognized after a restart" lists which apps are matched by tab, workspace, document, or title.
 
+### Removed
+- Licensing. PixlPut is free and open source, so the license check, 14-day trial, feature gates, License window and Settings pane, and the license API call are gone; every feature is always available and the update check is the only network call. The license server (`server/`), the launch checklist (`SHIPIT.md`), and the website's pricing and buy pages are deleted too.
+
 ### Fixed
 - A saved window ID from an earlier boot could pair with a different window. The window server numbers windows from scratch after a restart and apps relaunching in the same order draw the same numbers again (VS Code windows 283–291 on 2026-10-01). Window IDs are now trusted only for windows captured since the current boot (`kern.boottime`).
 

@@ -6,7 +6,7 @@
 interface Props {
     title: string;
     description: string;
-    path: string;          // e.g. "/", "/buy", "/changelog"
+    path: string;          // e.g. "/", "/changelog"
     ogImage?: string;      // relative or absolute
     pageType?: 'website' | 'article' | 'product';
     structuredData?: object;
@@ -154,9 +154,7 @@ const ogImageAbs = new URL(ogImage, Astro.site).toString();
             <ul>
                 <li><a href="/#features">Features</a></li>
                 <li><a href="/#how">How it works</a></li>
-                <li><a href="/#pricing">Pricing</a></li>
                 <li><a href="/#faq">FAQ</a></li>
-                <li><a href="/buy" class="btn-buy">Buy</a></li>
             </ul>
         </nav>
     </header>

@@ -12,7 +12,6 @@ public final class MenuBarController {
     private let lifecycle: AppLifecycle
     private var cancellables: Set<AnyCancellable> = []
     private weak var onboardingWindow: NSWindow?
-    private var paywallController: NSWindowController?
     private var restorePickerController: NSWindowController?
 
     public init(statusModel: MenuBarStatusModel, lifecycle: AppLifecycle) {
@@ -61,12 +60,6 @@ public final class MenuBarController {
             .receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.rebuildMenu() }
             .store(in: &cancellables)
-        // Rebuild on license state changes too — so "Trial — N days left"
-        // and "License blocked" update without a manual menu open.
-        lifecycle.licenseValidator.objectWillChange
-            .receive(on: RunLoop.main)
-            .sink { [weak self] _ in self?.rebuildMenu() }
-            .store(in: &cancellables)
     }
 
     private func rebuildMenu() {
@@ -77,13 +70,6 @@ public final class MenuBarController {
         let statusHeader = NSMenuItem(title: statusLine(), action: nil, keyEquivalent: "")
         statusHeader.isEnabled = false
         menu.addItem(statusHeader)
-
-        // License/trial status line — clickable, opens the License pane.
-        if let licenseLine = licenseStatusLine() {
-            let item = NSMenuItem(title: licenseLine, action: #selector(openLicense), keyEquivalent: "")
-            item.target = self
-            menu.addItem(item)
-        }
 
         if let lastCap = statusModel.lastCapture {
             let item = NSMenuItem(
@@ -174,10 +160,6 @@ public final class MenuBarController {
         wizard.target = self
         menu.addItem(wizard)
 
-        let license = NSMenuItem(title: "License…", action: #selector(openLicense), keyEquivalent: "")
-        license.target = self
-        menu.addItem(license)
-
         menu.addItem(.separator())
 
         let checkUpdates = NSMenuItem(title: "Check for updates…", action: #selector(checkForUpdates), keyEquivalent: "")
@@ -189,26 +171,6 @@ public final class MenuBarController {
         menu.addItem(quit)
 
         statusItem.menu = menu
-    }
-
-    private func licenseStatusLine() -> String? {
-        // Only show a line when it's actionable info — active licenses don't
-        // need to be reminded; trials and problems do.
-        switch lifecycle.licenseValidator.state {
-        case .trial(let exp):
-            let days = max(0, Calendar.current.dateComponents([.day], from: Date(), to: exp).day ?? 0)
-            return "Trial — \(days) day\(days == 1 ? "" : "s") left"
-        case .noLicense:
-            return "No license — click to set up"
-        case .trialExpired:
-            return "⚠ Trial expired — click to buy"
-        case .graceOverdue:
-            return "⚠ License needs validation"
-        case .hardExpired:
-            return "⚠ License blocked — click to fix"
-        case .active:
-            return nil
-        }
     }
 
     private func statusLine() -> String {
@@ -282,14 +244,6 @@ public final class MenuBarController {
 
     @objc private func openDeepIdentityWizard() {
         DeepIdentityWizard.open(lifecycle: lifecycle)
-    }
-
-    @objc private func openLicense() {
-        if paywallController == nil {
-            paywallController = PaywallWindow.makeWindowController(lifecycle: lifecycle)
-        }
-        paywallController?.window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     @objc private func checkForUpdates() {
